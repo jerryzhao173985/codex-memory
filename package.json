@@ -1,0 +1,23 @@
+{
+  "name": "clawd-codex-backend",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Standalone Codex-only backend extracted from clawd-on-desk",
+  "type": "commonjs",
+  "files": [
+    "*.js",
+    "bin/",
+    "docs/"
+  ],
+  "bin": {
+    "cmem": "bin/cmem.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "remote-monitor": "node remote-monitor.js",
+    "inspect": "node inspect.js",
+    "history": "node history.js",
+    "cmem": "node bin/cmem.js",
+    "test": "node --test test/*.test.js"
+  }
+}
