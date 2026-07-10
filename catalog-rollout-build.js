@@ -1,5 +1,7 @@
 "use strict";
 
+const MAX_COLLAB_AGENT_SPAWNS_PER_SESSION = 40;
+
 function createCatalogRolloutBuild(deps = {}) {
   const {
     fs,
@@ -497,6 +499,29 @@ function createCatalogRolloutBuild(deps = {}) {
         break;
       case "reasoning":
         session.reasoningCount += 1;
+        break;
+      case "thread_meta":
+        if (record.threadMeta && record.threadMeta.threadName) {
+          session.threadName = record.threadMeta.threadName;
+          noteSearchBucket(session, "name", record.threadMeta.threadName);
+        }
+        break;
+      case "collab":
+        if (record.collab && record.collab.spawnedThreadId) {
+          const spawnedThreadId = prefixedSessionId(record.collab.spawnedThreadId);
+          if (spawnedThreadId && !session.collabAgentSpawns.some((entry) => entry.threadId === spawnedThreadId)) {
+            pushBounded(session.collabAgentSpawns, {
+              threadId: spawnedThreadId,
+              agentNickname: record.collab.agentNickname || null,
+              agentRole: record.collab.agentRole || null,
+              model: record.collab.model || null,
+            }, MAX_COLLAB_AGENT_SPAWNS_PER_SESSION);
+            if (record.collab.agentNickname) noteSearchBucket(session, "agents", record.collab.agentNickname);
+          }
+        }
+        break;
+      case "guardian":
+        session.guardianCount += 1;
         break;
       case "tool_call":
         session.commandCount += record.command ? 1 : 0;

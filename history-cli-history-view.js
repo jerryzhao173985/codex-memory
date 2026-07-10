@@ -54,6 +54,7 @@ function createHistoryCliHistoryView(deps = {}) {
       console.log(firstLine);
 
       const secondLine = [
+        session.threadName ? `name="${session.threadName}"` : "",
         session.sessionKey ? `rollout=${session.sessionKey}` : "",
         session.forkedFromId ? `forked_from=${session.forkedFromId}` : "",
         session.parentThreadId ? `parent=${session.parentThreadId}` : "",
@@ -131,6 +132,7 @@ function createHistoryCliHistoryView(deps = {}) {
       session.updatedAt || session.startedAt || "",
       session.historyMode ? `history=${session.historyMode}` : "",
     ].filter(Boolean).join(" | "));
+    if (session.threadName) console.log(`name: ${session.threadName}`);
     if (session.cwd) console.log(`cwd: ${session.cwd}`);
     console.log([
       session.model ? `model=${session.model}` : "",
@@ -148,8 +150,14 @@ function createHistoryCliHistoryView(deps = {}) {
       `searches=${session.counts.searches}`,
       `mcp=${session.counts.mcp}`,
       `errors=${session.counts.errors}`,
+      session.guardianCount > 0 ? `guardian=${session.guardianCount}` : "",
       session.lineageFamilyCount > 1 ? `family=${session.lineageFamilyCount}` : "",
-    ].join("  "));
+    ].filter(Boolean).join("  "));
+    if (Array.isArray(session.collabAgentSpawns) && session.collabAgentSpawns.length) {
+      console.log(`spawned agents: ${session.collabAgentSpawns
+        .map((entry) => `${entry.agentNickname || entry.threadId}${entry.agentRole ? ` (${entry.agentRole})` : ""}`)
+        .join(", ")}`);
+    }
     if (session.lastUserPreview) console.log(`last user: ${session.lastUserPreview}`);
     if (session.finalAnswerPreview) console.log(`last answer: ${session.finalAnswerPreview}`);
     printAnnotationLines(session.annotation);

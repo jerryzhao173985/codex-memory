@@ -364,6 +364,9 @@ function createCatalogSessionSummary(deps = {}) {
         }
         : null,
       baseInstructionsPreview: session.baseInstructionsPreview || "",
+      threadName: session.threadName || null,
+      collabAgentSpawns: Array.isArray(session.collabAgentSpawns) ? session.collabAgentSpawns : [],
+      guardianCount: Number.isInteger(session.guardianCount) ? session.guardianCount : 0,
       dynamicToolCount: Number.isInteger(session.dynamicToolCount)
         ? session.dynamicToolCount
         : ((session.dynamicToolNames || []).length || 0),
@@ -452,6 +455,7 @@ function createCatalogSessionSummary(deps = {}) {
       eventMode: session.rolloutPersistence ? session.rolloutPersistence.eventMode : null,
       qualityClass: classifySessionQuality(session),
       tags: session.tags,
+      threadName: session.threadName || null,
       gitBranch: session.gitBranch || null,
       dynamicToolCount: Number.isInteger(session.dynamicToolCount)
         ? session.dynamicToolCount

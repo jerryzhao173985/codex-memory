@@ -4022,6 +4022,94 @@ describe("historical catalog", () => {
   });
 });
 
+describe("session evidence wiring", () => {
+  it("captures thread names, collab agent spawns, and guardian counts on session docs", () => {
+    const { tmpDir, dateDir } = makeTempSessionDir();
+    try {
+      writeRollout(dateDir, FILE_A, [
+        {
+          timestamp: "2026-04-09T15:10:51.000Z",
+          type: "session_meta",
+          payload: { id: "019d23d4-f1a9-7633-b9c7-758327137228", cwd: "/repo/wire" },
+        },
+        {
+          timestamp: "2026-04-09T15:10:52.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-1" },
+        },
+        {
+          timestamp: "2026-04-09T15:10:53.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_name_updated",
+            thread_id: "019d23d4-f1a9-7633-b9c7-758327137228",
+            thread_name: "Wire evidence probe",
+          },
+        },
+        {
+          timestamp: "2026-04-09T15:10:54.000Z",
+          type: "event_msg",
+          payload: {
+            type: "collab_agent_spawn_end",
+            call_id: "call-spawn",
+            sender_thread_id: "019d23d4-f1a9-7633-b9c7-758327137228",
+            new_thread_id: "019d23d4-aaaa-7633-b9c7-758327137aaa",
+            new_agent_nickname: "Herschel",
+            new_agent_role: "explorer",
+            model: "gpt-5.4-mini",
+            prompt: "Explore the wiring",
+            status: "pending_init",
+          },
+        },
+        {
+          timestamp: "2026-04-09T15:10:55.000Z",
+          type: "event_msg",
+          payload: {
+            type: "guardian_assessment",
+            id: "assessment-1",
+            target_item_id: "call-risky",
+            turn_id: "turn-1",
+            status: "in_progress",
+            action: { type: "command", command: "rm -rf build", cwd: "/repo/wire" },
+          },
+        },
+        {
+          timestamp: "2026-04-09T15:10:56.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn-1", last_agent_message: "wired" },
+        },
+      ]);
+
+      const catalog = buildHistoricalCatalog({ sessionDir: tmpDir, historyMode: "effective" });
+      const session = catalog.sessions.find(
+        (item) => item.sessionId === "codex:019d23d4-f1a9-7633-b9c7-758327137228"
+      );
+      assert.ok(session);
+      assert.strictEqual(session.threadName, "Wire evidence probe");
+      assert.strictEqual(session.guardianCount, 1);
+      assert.deepStrictEqual(session.collabAgentSpawns, [{
+        threadId: "codex:019d23d4-aaaa-7633-b9c7-758327137aaa",
+        agentNickname: "Herschel",
+        agentRole: "explorer",
+        model: "gpt-5.4-mini",
+      }]);
+
+      const summary = getCatalogSession(catalog, session.sessionId, {});
+      assert.strictEqual(summary.threadName, "Wire evidence probe");
+      assert.strictEqual(summary.guardianCount, 1);
+      assert.strictEqual(summary.collabAgentSpawns.length, 1);
+
+      // Name and spawned-agent nickname are searchable evidence.
+      const byName = listCatalogSessions(catalog, { q: "Wire evidence probe" });
+      assert.strictEqual(byName.total, 1);
+      const byAgent = listCatalogSessions(catalog, { q: "Herschel" });
+      assert.strictEqual(byAgent.total, 1);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("implicit turn synthesis", () => {
   it("keeps implicit turn ids aligned across catalog build and event reads when a rollback drops a turn", () => {
     const { tmpDir, dateDir } = makeTempSessionDir();

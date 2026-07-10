@@ -69,6 +69,7 @@ function parseArgs(argv) {
     else if (arg === "--exact") args.exact = true;
     else if (arg === "--fuzzy") args.fuzzy = true;
     else if (arg === "--force") args.force = true;
+    else if (arg === "--rebuild") args.rebuild = true;
     else if (arg === "--session-dir") { args.sessionDir = readRequiredOptionValue(argv, index, "--session-dir"); index += 1; }
     else if (arg === "--index-dir") { args.indexDir = readRequiredOptionValue(argv, index, "--index-dir"); index += 1; }
     else if (arg === "--config") { args.config = readRequiredOptionValue(argv, index, "--config"); index += 1; }
@@ -149,6 +150,7 @@ function buildSessionCard(session, options = {}) {
     cwd: session.cwd,
     answerPreview: session.finalAnswerPreview || "",
   };
+  if (session.threadName) card.name = session.threadName;
   if (options.annotations) {
     const annotation = session.annotation || {};
     card.bookmarked = annotation.bookmarked === true;
@@ -506,8 +508,12 @@ async function runStatusCommand(store, args, runtime, effective) {
   };
 }
 
-function runDoctorCommand(store, filters) {
-  return store.getDoctor({ historyMode: filters.historyMode, refresh: true });
+function runDoctorCommand(store, filters, args) {
+  return store.getDoctor({
+    historyMode: filters.historyMode,
+    rebuild: Boolean(args && args.rebuild),
+    refresh: true,
+  });
 }
 
 // --- config / use -----------------------------------------------------------
@@ -619,7 +625,7 @@ function renderLatestText(result) {
   for (let index = 0; index < sessions.length; index += 1) {
     const session = sessions[index];
     const position = index + 1;
-    console.log(`${position}. ${session.sessionId}${session.cwd ? `  ${session.cwd}` : ""}`);
+    console.log(`${position}. ${session.sessionId}${session.cwd ? `  ${session.cwd}` : ""}${session.name ? `  "${session.name}"` : ""}`);
     if (session.answerPreview) console.log(`answer: ${session.answerPreview}`);
     if (session.bookmarked) console.log("bookmarked");
     if (session.note) console.log(`note: ${session.note}`);
@@ -955,7 +961,7 @@ Usage:
   cmem archive <id>
   cmem unarchive <id>
   cmem status
-  cmem doctor
+  cmem doctor [--rebuild]
   cmem saved
   cmem bookmarks
   cmem pin | unpin | note | clear-note | tag | untag <id | latest[:N] | N | saved[:N] | bookmark[:N]>
@@ -1048,7 +1054,7 @@ async function routeCommand(store, args, context) {
       return { result, render: () => renderStatusText(result, args, runtime) };
     }
     case "doctor": {
-      const result = runDoctorCommand(store, filters);
+      const result = runDoctorCommand(store, filters, args);
       return { result, render: () => renderDoctorText(result) };
     }
     case "saved": {
