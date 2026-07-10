@@ -118,7 +118,29 @@ function createHistoryStoreBridge(options = {}) {
       if (!bridge || typeof bridge.listThreadTurns !== "function") throw createUnavailableBridgeError();
 
       const response = await bridge.listThreadTurns(sessionId, filters);
-      return attachBridgeOperationSource(normalizeBridgeTurnsListResponse(response));
+      const normalized = normalizeBridgeTurnsListResponse(response);
+      // A turns/list page is Turn[] with the same item shape as thread/read's
+      // turns, so reuse the full app-server thread-view mapper to turn the raw
+      // page into rich per-turn summaries (prompts, answers, commands, files).
+      const view = buildBridgeThreadSessionView(
+        { id: prefixedSessionId(sessionId), turns: normalized.turns },
+        null
+      );
+      // The mapper re-sorts turns chronologically; restore the server's page
+      // order (newest-first by default) so cursor paging stays coherent.
+      const summaryByTurnId = new Map(
+        (view && view.session && Array.isArray(view.session.turns) ? view.session.turns : [])
+          .map((turn) => [turn.turnId, turn])
+      );
+      const turns = normalized.turns
+        .map((rawTurn) => summaryByTurnId.get(rawTurn && rawTurn.id))
+        .filter(Boolean);
+      return attachBridgeOperationSource({
+        total: normalized.total,
+        nextCursor: normalized.nextCursor,
+        backwardsCursor: normalized.backwardsCursor,
+        turns,
+      });
     },
     async getBridgeThreadGoal(sessionId) {
       const bridge = getAppServer();

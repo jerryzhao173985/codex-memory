@@ -104,11 +104,24 @@ function createHistoryCliBridgeView(deps = {}) {
     console.log("");
     for (const turn of result.turns) {
       console.log([
-        turn.id || turn.turnId || "(turn)",
-        turn.status ? `status=${typeof turn.status === "string" ? turn.status : turn.status.type || ""}` : "",
-        Number.isFinite(turn.startedAt) ? `started=${new Date(turn.startedAt * 1000).toISOString()}` : "",
-        Array.isArray(turn.items) ? `items=${turn.items.length}` : `itemsView=${turn.itemsView || "notLoaded"}`,
+        turn.turnId || "(turn)",
+        turn.status ? `status=${turn.status}` : "",
+        turn.startedAt || turn.endedAt || "",
+        Number.isInteger(turn.eventCount) ? `events=${turn.eventCount}` : "",
       ].filter(Boolean).join("  "));
+      if (turn.userPromptPreview) console.log(`  user: ${turn.userPromptPreview}`);
+      if (turn.finalAnswerPreview) console.log(`  answer: ${turn.finalAnswerPreview}`);
+      else if (turn.commentaryPreview) console.log(`  commentary: ${turn.commentaryPreview}`);
+      if (Array.isArray(turn.commandTypes) && turn.commandTypes.length) {
+        console.log(`  commands: ${turn.commandTypes.slice(0, 8).join(", ")}`);
+      }
+      if (Array.isArray(turn.filesTouched) && turn.filesTouched.length) {
+        console.log(`  files: ${turn.filesTouched.slice(0, 6).join(", ")}`);
+      }
+      if (Array.isArray(turn.errors) && turn.errors.length) {
+        console.log(`  errors: ${turn.errors.length}`);
+      }
+      console.log("");
     }
     if (result.nextCursor) console.log(`next cursor: ${result.nextCursor} (older turns)`);
     if (result.backwardsCursor) console.log(`backwards cursor: ${result.backwardsCursor} (newer turns; flip --sort-direction)`);

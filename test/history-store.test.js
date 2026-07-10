@@ -3194,8 +3194,26 @@ describe("history store", () => {
           calls.push(["thread/turns/list", sessionId, params]);
           return {
             data: [
-              { id: "turn-2", status: "completed", itemsView: "summary" },
-              { id: "turn-1", status: "completed", itemsView: "summary" },
+              {
+                id: "turn-2",
+                status: "completed",
+                startedAt: 1776376100,
+                completedAt: 1776376184,
+                items: [
+                  { type: "userMessage", id: "u2", content: [{ type: "text", text: "second question" }] },
+                  { type: "agentMessage", id: "a2", text: "second answer", phase: "final_answer" },
+                ],
+              },
+              {
+                id: "turn-1",
+                status: "completed",
+                startedAt: 1776376000,
+                completedAt: 1776376050,
+                items: [
+                  { type: "userMessage", id: "u1", content: [{ type: "text", text: "first question" }] },
+                  { type: "agentMessage", id: "a1", text: "first answer", phase: "final_answer" },
+                ],
+              },
             ],
             nextCursor: "turn-cursor",
             backwardsCursor: null,
@@ -3252,7 +3270,10 @@ describe("history store", () => {
       itemsView: "summary",
     });
     assert.strictEqual(turns.total, 2);
-    assert.strictEqual(turns.turns[0].id, "turn-2");
+    // Rich per-turn summaries reused from the app-server thread-view mapper.
+    assert.strictEqual(turns.turns[0].turnId, "turn-2");
+    assert.strictEqual(turns.turns[0].userPromptPreview, "second question");
+    assert.strictEqual(turns.turns[0].finalAnswerPreview, "second answer");
     assert.strictEqual(turns.nextCursor, "turn-cursor");
 
     const goal = await store.getBridgeThreadGoal("codex:019d-goal-thread");
