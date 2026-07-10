@@ -2,8 +2,12 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
+const { quoteShellArg } = require("../cli-text");
 const { createHistoryStore } = require("../history-store");
+const { resolveHistoryIndexRoot } = require("../history-store-index");
 const { prefixedSessionId } = require("../history-session-id");
 const { createArgReaders, readValidatedInteger } = require("../input-validation");
 const {
@@ -23,6 +27,98 @@ const BRIDGE_THREAD_SOURCE_KIND_HELP_TEXT = BRIDGE_CANONICAL_THREAD_SOURCE_KINDS
 
 const DEFAULT_LIMIT = 10;
 const REF_LOOKUP_LIMIT = 100000;
+const FREE_TEXT_CANDIDATE_LIMIT = 6;
+
+// Commands the front door knows. Anything else the user types is treated as
+// search text (or a date), so "type what you're thinking" always works.
+const KNOWN_COMMANDS = new Set([
+  "overview", "latest", "date", "on", "all",
+  "find", "search", "query",
+  "open", "resume", "continue",
+  "repo", "project", "threads", "archive", "unarchive",
+  "status", "doctor", "saved", "bookmarks",
+  "pin", "unpin", "note", "clear-note", "tag", "untag",
+  "use", "config", "help",
+]);
+
+// The last rendered, numbered session list. Bare numeric refs resolve against
+// it so a number always means "the list I just saw". Stored beside the index
+// (rebuildable UX state, never authoritative).
+let lastListPath = null;
+
+function setLastListPath(indexDir) {
+  try {
+    lastListPath = path.join(resolveHistoryIndexRoot(indexDir), "cmem-last-list.json");
+  } catch {
+    lastListPath = null;
+  }
+}
+
+function writeLastList(sessionIds) {
+  if (!lastListPath || !Array.isArray(sessionIds) || !sessionIds.length) return;
+  try {
+    fs.mkdirSync(path.dirname(lastListPath), { recursive: true });
+    // Never cap: the snapshot must cover every printed row (R6).
+    fs.writeFileSync(lastListPath, JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      sessionIds,
+    }));
+  } catch {}
+}
+
+function readLastList() {
+  if (!lastListPath) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(lastListPath, "utf8"));
+    if (!parsed || !Array.isArray(parsed.sessionIds)) return null;
+    return parsed.sessionIds.filter((id) => typeof id === "string" && id);
+  } catch {
+    return null;
+  }
+}
+
+// Only remove properly closed reminder blocks: an unclosed or literal
+// "<system-reminder>" token must never eat the user's own text after it.
+function stripSystemReminders(text) {
+  if (typeof text !== "string" || !text) return "";
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Lists carry the ids they printed (in printed order) on a non-enumerable key
+// so main() can write the bare-N snapshot once after a text render without
+// leaking the field into --json output.
+function attachSnapshotIds(result, sessionIds) {
+  if (!result || typeof result !== "object") return result;
+  Object.defineProperty(result, "snapshotIds", {
+    value: Array.isArray(sessionIds) ? sessionIds.filter((id) => typeof id === "string" && id) : [],
+    enumerable: false,
+  });
+  return result;
+}
+
+function formatRelativeTimestamp(value) {
+  const ms = Date.parse(typeof value === "string" ? value : "");
+  if (!Number.isFinite(ms)) return "";
+  const diff = Date.now() - ms;
+  // Future timestamps (clock skew) render like the >30d shape for coherence.
+  if (diff < 0) return new Date(ms).toISOString().slice(0, 10);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${Math.max(minutes, 1)}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function firstLine(text, maxChars = 160) {
+  const value = typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+  if (!value) return "";
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}…`;
+}
 
 function createCmemError(message, code = "HISTORY_INVALID_ARGUMENT") {
   const err = new Error(message);
@@ -59,8 +155,15 @@ function parseArgs(argv) {
   };
   let command = null;
 
+  let optionsEnded = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (optionsEnded) {
+      if (command === null) command = arg;
+      else args.positionals.push(arg);
+      continue;
+    }
+    if (arg === "--") { optionsEnded = true; continue; }
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--json") args.json = true;
     else if (arg === "--pretty") args.pretty = true;
@@ -70,6 +173,7 @@ function parseArgs(argv) {
     else if (arg === "--fuzzy") args.fuzzy = true;
     else if (arg === "--force") args.force = true;
     else if (arg === "--rebuild") args.rebuild = true;
+    else if (arg === "--print") args.print = true;
     else if (arg === "--session-dir") { args.sessionDir = readRequiredOptionValue(argv, index, "--session-dir"); index += 1; }
     else if (arg === "--index-dir") { args.indexDir = readRequiredOptionValue(argv, index, "--index-dir"); index += 1; }
     else if (arg === "--config") { args.config = readRequiredOptionValue(argv, index, "--config"); index += 1; }
@@ -89,17 +193,18 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--archived") {
       const next = argv[index + 1];
-      if (typeof next === "string" && next && !next.startsWith("--")) {
+      // Only consume a boolean-shaped value; never grab a bare positional.
+      if (typeof next === "string" && /^(true|false|1|0|yes|no)$/i.test(next)) {
         args.archived = next;
         index += 1;
       } else {
         args.archived = true;
       }
-    } else if (arg.startsWith("--")) {
-      // Unknown flag: ignore it AND swallow its value token so stray
-      // harness-forwarded options never leak into positionals (ref/text).
-      const next = argv[index + 1];
-      if (typeof next === "string" && next && !next.startsWith("--")) index += 1;
+    } else if (arg.startsWith("-") && arg !== "-" && !/^-\d/.test(arg)) {
+      // A typo'd flag silently changing results is worse than an error.
+      // Single-dash typos (-limit, -x) are rejected too; numeric tokens like
+      // -5 stay positional so they can still be search text.
+      throw createCmemError(`unknown option: ${arg} (see cmem --help; use "--" before literal dash values)`);
     } else if (command === null) {
       command = arg;
     } else {
@@ -148,6 +253,7 @@ function buildSessionCard(session, options = {}) {
   const card = {
     sessionId: session.sessionId,
     cwd: session.cwd,
+    updatedAt: session.updatedAt || session.startedAt || null,
     answerPreview: session.finalAnswerPreview || "",
   };
   if (session.threadName) card.name = session.threadName;
@@ -191,6 +297,7 @@ function listLatestSessions(store, filters, limit) {
     shape: "compact",
     limit,
     cwd: filters.cwd,
+    qualityClass: filters.qualityClass,
   });
   return result.sessions || [];
 }
@@ -215,11 +322,27 @@ function resolveSessionRef(store, ref, filters) {
     return entry.sessionId;
   }
 
+  // Bare numbers mean "the numbered list I just saw" (any cmem list snapshots
+  // itself); they fall back to latest order when no snapshot exists.
+  // `latest[:N]` always explicitly means latest order.
+  if (/^\d+$/.test(raw)) {
+    const position = parseInt(raw, 10);
+    if (!(position > 0)) throw createCmemError("session index must be a positive integer");
+    const snapshot = readLastList();
+    if (snapshot && snapshot.length) {
+      const entry = snapshot[position - 1];
+      if (!entry) throw createCmemError(`the last list had only ${snapshot.length} ${pluralize(snapshot.length, "session")} — no entry ${position}`);
+      return entry;
+    }
+    const sessions = listLatestSessions(store, filters, Math.max(position, REF_LOOKUP_LIMIT));
+    const entry = sessions[position - 1];
+    if (!entry) throw createCmemError(`no session at latest position ${position}`);
+    return entry.sessionId;
+  }
+
   const latestMatch = /^latest(?::(\d+))?$/i.exec(raw);
-  if (latestMatch || /^\d+$/.test(raw)) {
-    const position = latestMatch
-      ? (latestMatch[1] ? parseInt(latestMatch[1], 10) : 1)
-      : parseInt(raw, 10);
+  if (latestMatch) {
+    const position = latestMatch[1] ? parseInt(latestMatch[1], 10) : 1;
     if (!(position > 0)) throw createCmemError("session index must be a positive integer");
     const sessions = listLatestSessions(store, filters, Math.max(position, REF_LOOKUP_LIMIT));
     const entry = sessions[position - 1];
@@ -227,33 +350,86 @@ function resolveSessionRef(store, ref, filters) {
     return entry.sessionId;
   }
 
-  return prefixedSessionId(raw) || raw;
+  // UUID-shaped refs are ids; anything else is free text resolved via search.
+  if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(raw)) {
+    return prefixedSessionId(raw) || raw;
+  }
+
+  return resolveSessionRefByText(store, raw, filters);
+}
+
+function searchSessionsForRef(store, text, filters) {
+  const base = {
+    cwd: filters.cwd,
+    qualityClass: filters.qualityClass,
+    shape: "compact",
+    limit: FREE_TEXT_CANDIDATE_LIMIT,
+  };
+  const exact = store.listSessions({ ...base, q: text, qMode: "substring" });
+  if (exact.total > 0) return { mode: "substring", result: exact };
+  const fuzzy = store.listSessions({ ...base, q: text, qMode: "fuzzy" });
+  return { mode: "fuzzy", result: fuzzy };
+}
+
+function resolveSessionRefByText(store, text, filters) {
+  const { result } = searchSessionsForRef(store, text, filters);
+  const sessions = result.sessions || [];
+  if (!sessions.length) {
+    throw createCmemError(`no session matches "${text}" — try: cmem ${text.split(/\s+/)[0]} (fewer words) or cmem latest`);
+  }
+  if (result.total === 1 || sessions.length === 1) {
+    const hit = sessions[0];
+    console.error(`resolved "${text}" → ${hit.sessionId}${hit.cwd ? ` (${hit.cwd})` : ""}`);
+    return hit.sessionId;
+  }
+  console.error(`"${text}" matches ${result.total} sessions:`);
+  for (let index = 0; index < sessions.length; index += 1) {
+    const hit = sessions[index];
+    const when = formatRelativeTimestamp(hit.updatedAt || hit.startedAt);
+    console.error(`  ${index + 1}. ${when ? `${when}  ` : ""}${hit.sessionId}${hit.cwd ? `  ${hit.cwd}` : ""}${hit.threadName ? `  "${hit.threadName}"` : ""}`);
+  }
+  writeLastList(sessions.map((hit) => hit.sessionId));
+  throw createCmemError(`pick one by number, e.g. cmem open 1`);
 }
 
 // --- Session browse commands ------------------------------------------------
 
 function runOverviewCommand(store, filters, limit) {
   const sessions = listLatestSessions(store, filters, limit);
-  return {
+  return attachSnapshotIds({
     command: "overview",
     latest: sessions.map((session) => buildSessionCard(session, { annotations: true })),
-  };
+  }, sessions.map((session) => session.sessionId));
 }
 
 function runLatestCommand(store, filters, limit) {
   const sessions = listLatestSessions(store, filters, limit);
-  return {
+  return attachSnapshotIds({
     command: "latest",
     sessions: sessions.map((session) => buildSessionCard(session)),
-  };
+  }, sessions.map((session) => session.sessionId));
 }
 
 function normalizeDay(value) {
   const raw = typeof value === "string" ? value.trim() : "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    // Shape is not enough: 2026-13-45 must not become a silent empty day.
+    const parsed = new Date(`${raw}T00:00:00.000Z`);
+    if (Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === raw) return raw;
+    throw createCmemError(`"${value}" is not a real calendar day — use YYYY-MM-DD, today, or yesterday`);
+  }
   if (raw === "today") return new Date().toISOString().slice(0, 10);
   if (raw === "yesterday") return new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  return raw;
+  throw createCmemError(`"${value}" is not a day — use YYYY-MM-DD, today, or yesterday`);
+}
+
+function requireNoExtraDayWords(args) {
+  if (args.positionals.length > 1) {
+    const rest = args.positionals.slice(1).join(" ");
+    throw createCmemError(
+      `unexpected extra input after the day: "${rest}" — to search instead, try: cmem find ${args.positionals.join(" ")}`
+    );
+  }
 }
 
 function sessionDay(session) {
@@ -262,53 +438,81 @@ function sessionDay(session) {
 }
 
 function runDateCommand(store, args, filters) {
+  requireNoExtraDayWords(args);
   const day = normalizeDay(args.positionals[0]);
-  const result = store.listSessions({ shape: "compact", limit: REF_LOOKUP_LIMIT, cwd: filters.cwd });
+  const result = store.listSessions({ shape: "compact", limit: REF_LOOKUP_LIMIT, cwd: filters.cwd, qualityClass: filters.qualityClass });
   const matched = (result.sessions || []).filter((session) => sessionDay(session) === day);
-  return {
+  return attachSnapshotIds({
     command: "date",
     day,
     total: matched.length,
     sessions: matched.map((session) => buildSessionCard(session)),
-  };
+  }, matched.map((session) => session.sessionId));
 }
 
 function runAllCommand(store, filters) {
-  const result = store.listSessions({ shape: "compact", limit: REF_LOOKUP_LIMIT, cwd: filters.cwd });
-  return {
+  const result = store.listSessions({ shape: "compact", limit: REF_LOOKUP_LIMIT, cwd: filters.cwd, qualityClass: filters.qualityClass });
+  return attachSnapshotIds({
     command: "all",
     total: result.total,
     sessions: (result.sessions || []).map((session) => buildSessionCard(session)),
-  };
+  }, (result.sessions || []).map((session) => session.sessionId));
 }
 
 function runFindCommand(store, args, filters, limit) {
-  const text = args.positionals.join(" ");
-  const qMode = args.fuzzy ? "fuzzy" : "substring";
-  const result = store.listSessions({
+  const text = args.positionals.join(" ").trim();
+  if (!text) {
+    throw createCmemError('search text is required — try: cmem <words>, e.g. cmem mlir lowering');
+  }
+  let qMode = args.fuzzy ? "fuzzy" : "substring";
+  let result = store.listSessions({
     q: text,
     qMode,
     cwd: filters.cwd,
+    qualityClass: filters.qualityClass,
     shape: "compact",
     limit,
   });
+  let fuzzyFallback = false;
+  if (result.total === 0 && qMode === "substring") {
+    // Typos shouldn't dead-end a memory search; retry tolerantly and say so.
+    const fuzzy = store.listSessions({
+      q: text,
+      qMode: "fuzzy",
+      cwd: filters.cwd,
+      qualityClass: filters.qualityClass,
+      shape: "compact",
+      limit,
+    });
+    if (fuzzy.total > 0) {
+      result = fuzzy;
+      qMode = "fuzzy";
+      fuzzyFallback = true;
+    }
+  }
   const title = qMode === "fuzzy" ? `Fuzzy search for "${text}"` : `Search for "${text}"`;
-  return {
+  return attachSnapshotIds({
     command: "find",
     matchMode: qMode,
+    fuzzyFallback,
     title,
+    text,
     total: result.total,
     sessions: (result.sessions || []).map((session) => buildSessionCard(session, { match: true })),
-  };
+  }, (result.sessions || []).map((session) => session.sessionId));
 }
 
 function runQueryCommand(store, args, filters, limit) {
-  const text = args.positionals.join(" ");
+  const text = args.positionals.join(" ").trim();
+  if (!text) {
+    throw createCmemError('query text is required — try: cmem query <words>, e.g. cmem query ufl2mlir');
+  }
   const queryMode = args.exact ? "exact" : args.fuzzy ? "fuzzy" : "substring";
   const result = store.listSessions({
     query: text,
     queryMode,
     cwd: filters.cwd,
+    qualityClass: filters.qualityClass,
     shape: "compact",
     limit,
   });
@@ -317,13 +521,14 @@ function runQueryCommand(store, args, filters, limit) {
     : queryMode === "fuzzy"
       ? `Fuzzy captured query "${text}"`
       : `Captured query match for "${text}"`;
-  const envelope = {
+  const envelope = attachSnapshotIds({
     command: "query",
     matchMode: queryMode,
     title,
+    text,
     total: result.total,
     sessions: (result.sessions || []).map((session) => buildSessionCard(session, { match: true })),
-  };
+  }, (result.sessions || []).map((session) => session.sessionId));
   if (queryMode === "fuzzy") {
     envelope.querySignalSummary = result.querySignalSummary || { onlyLowSignal: false, examples: [] };
   }
@@ -336,11 +541,14 @@ function buildSavedCard(session, mode) {
   const annotation = session.annotation || {};
   const card = {
     sessionId: session.sessionId,
+    cwd: session.cwd,
+    updatedAt: session.updatedAt || session.startedAt || null,
     bookmarked: annotation.bookmarked === true,
     note: typeof annotation.note === "string" ? annotation.note : "",
     tags: Array.isArray(annotation.tags) ? annotation.tags : [],
     manualUpdatedAt: typeof annotation.updatedAt === "string" ? annotation.updatedAt : null,
   };
+  if (session.threadName) card.name = session.threadName;
   if (mode === "saved") card.saved = true;
   return card;
 }
@@ -351,7 +559,10 @@ function runSavedListCommand(store, filters, mode) {
     ? annotated.filter((session) => session.annotation && session.annotation.bookmarked === true)
     : annotated;
   const sessions = list.map((session) => buildSavedCard(session, mode === "bookmarks" ? "bookmarks" : "saved"));
-  return { command: mode, total: sessions.length, sessions };
+  return attachSnapshotIds(
+    { command: mode, total: sessions.length, sessions },
+    sessions.map((session) => session.sessionId)
+  );
 }
 
 // --- Annotation mutation commands -------------------------------------------
@@ -390,7 +601,8 @@ function isConversationItem(item) {
 }
 
 async function runOpenCommand(store, args, filters) {
-  const ref = args.positionals[0];
+  // Multi-word free text is a valid ref: `cmem open sox locomotion stall`.
+  const ref = args.positionals.join(" ");
   const sessionId = resolveSessionRef(store, ref, filters);
   const useTimeline = args.timeline === true || (typeof args.q === "string" && args.q.trim().length > 0);
   const result = await store.getTranscriptResolved(sessionId, {
@@ -407,7 +619,8 @@ async function runOpenCommand(store, args, filters) {
 }
 
 async function runResumeCommand(store, args, filters) {
-  const ref = args.positionals[0];
+  // Multi-word free text is a valid ref: `cmem resume sox locomotion stall`.
+  const ref = args.positionals.join(" ");
   const sessionId = resolveSessionRef(store, ref, filters);
   const result = await store.getResumeResolved(sessionId, {
     reloadPolicy: filters.reloadPolicy || "strict",
@@ -425,19 +638,85 @@ async function runResumeCommand(store, args, filters) {
   };
 }
 
+// --- continue (hand off into Codex) ------------------------------------------
+
+function buildCodexResumeCommand(sessionId, prompt) {
+  const uuid = String(sessionId).replace(/^codex:/, "");
+  const argv = ["resume", uuid];
+  // clap treats a leading-dash positional as a flag; "--" delivers any prompt
+  // verbatim (codex's own error tip suggests exactly this).
+  if (prompt) argv.push("--", prompt);
+  return {
+    uuid,
+    argv,
+    display: `codex resume ${uuid}${prompt ? ` -- ${quoteShellArg(prompt)}` : ""}`,
+  };
+}
+
+function runContinueCommand(store, args, filters) {
+  const ref = args.positionals[0] || "latest";
+  const sessionId = resolveSessionRef(store, ref, filters);
+  const prompt = args.positionals.slice(1).join(" ");
+  const handoff = buildCodexResumeCommand(sessionId, prompt);
+  const payload = { command: "continue", sessionId, codexCommand: handoff.display };
+
+  // --json (or --print) reports the handoff instead of launching Codex.
+  if (args.json || args.print) {
+    return { result: payload, render: () => console.log(handoff.display) };
+  }
+
+  console.log(`continuing ${sessionId} in Codex…`);
+  const child = spawnSync("codex", handoff.argv, { stdio: "inherit" });
+  if (child.error) {
+    throw createCmemError(`could not launch codex: ${child.error.message} — is the codex CLI on PATH?`);
+  }
+  // Shell convention: a signal kill reports 128 + signal number.
+  const signalCode = child.signal ? 128 + ((os.constants.signals && os.constants.signals[child.signal]) || 0) : null;
+  const exitCode = signalCode ?? (Number.isInteger(child.status) ? child.status : 1);
+  return {
+    result: payload,
+    exitCode,
+    render: () => {
+      if (exitCode !== 0) {
+        console.log(child.signal ? `codex was terminated by ${child.signal}.` : `codex exited with ${exitCode}.`);
+        console.log(`If codex reported an archived thread: cmem unarchive ${sessionId}  then retry.`);
+      }
+    },
+  };
+}
+
 // --- repo -------------------------------------------------------------------
 
 function runRepoCommand(store, args, filters) {
-  const cwd = args.positionals.join(" ") || filters.cwd || "";
+  const raw = args.positionals.join(" ") || filters.cwd || process.cwd();
+  const cwd = path.isAbsolute(raw) ? raw : path.resolve(raw);
   const project = store.getProject(cwd, { historyMode: filters.historyMode });
-  if (!project) throw createCmemError(`no history found for repo: ${cwd}`);
-  return project;
+  if (project) return project;
+
+  // Not an exact repo path: match the argument against known repo cwds so
+  // `cmem repo pixelforge` works.
+  const needle = raw.toLowerCase();
+  const projects = store.listProjects({ shape: "compact", limit: REF_LOOKUP_LIMIT });
+  const candidates = (projects.projects || []).filter((entry) =>
+    typeof entry.cwd === "string" && entry.cwd.toLowerCase().includes(needle)
+  );
+  if (candidates.length === 1) {
+    console.error(`resolved "${raw}" → ${candidates[0].cwd}`);
+    const resolved = store.getProject(candidates[0].cwd, { historyMode: filters.historyMode });
+    if (resolved) return resolved;
+  }
+  if (candidates.length > 1) {
+    console.error(`"${raw}" matches ${candidates.length} repos:`);
+    for (const entry of candidates.slice(0, 8)) console.error(`  cmem repo ${entry.cwd}`);
+    throw createCmemError("pick one repo path from the list above");
+  }
+  throw createCmemError(`no history found for repo: ${cwd}`);
 }
 
 // --- threads / archive / unarchive ------------------------------------------
 
 async function runThreadsCommand(store, args, filters) {
-  return store.listBridgeThreads({
+  const result = await store.listBridgeThreads({
     limit: args.limitExplicit,
     cursor: args.cursor,
     sortKey: args.sortKey,
@@ -447,6 +726,7 @@ async function runThreadsCommand(store, args, filters) {
     modelProviders: args.modelProviders.length ? args.modelProviders : undefined,
     sourceKinds: args.sourceKinds.length ? args.sourceKinds : undefined,
   });
+  return attachSnapshotIds(result, (result.threads || []).map((thread) => thread.sessionId));
 }
 
 function resolveThreadId(ref) {
@@ -620,40 +900,54 @@ function runUseCommand(args) {
 
 // --- Text renderers ---------------------------------------------------------
 
+function renderSessionRow(position, session) {
+  const when = formatRelativeTimestamp(session.updatedAt);
+  console.log(`${position}. ${when ? `${when}  ` : ""}${session.sessionId}${session.cwd ? `  ${session.cwd}` : ""}${session.name ? `  "${session.name}"` : ""}`);
+}
+
 function renderLatestText(result) {
   const sessions = result.latest || result.sessions || [];
+  console.log(`Latest ${sessions.length} ${pluralize(sessions.length, "session")}`);
+  console.log("");
   for (let index = 0; index < sessions.length; index += 1) {
     const session = sessions[index];
-    const position = index + 1;
-    console.log(`${position}. ${session.sessionId}${session.cwd ? `  ${session.cwd}` : ""}${session.name ? `  "${session.name}"` : ""}`);
-    if (session.answerPreview) console.log(`answer: ${session.answerPreview}`);
-    if (session.bookmarked) console.log("bookmarked");
-    if (session.note) console.log(`note: ${session.note}`);
-    console.log("Try:");
-    console.log(`  cmem open ${position}`);
-    console.log(`  cmem resume ${position}`);
-    console.log(`  cmem pin ${position}`);
-    console.log("");
+    renderSessionRow(index + 1, session);
+    if (session.answerPreview) console.log(`   answer: ${firstLine(session.answerPreview)}`);
+    if (session.bookmarked) console.log("   bookmarked");
+    if (session.note) console.log(`   note: ${session.note}`);
   }
-  console.log("Tip: Bare numbers like 1 and 2 follow latest-session order.");
+  console.log("");
+  console.log("Try:");
+  console.log("  cmem open 1");
+  console.log("  cmem resume 1");
+  console.log("  cmem pin 1");
+  console.log("  cmem <text>   search everything");
+  console.log("Tip: Numbers follow the list you just saw.");
 }
 
 function renderFilteredList(result) {
   console.log(`${result.title} (${result.total})`);
-  console.log("");
-  for (const session of result.sessions) {
-    console.log(session.sessionId);
-    if (session.cwd) console.log(`cwd: ${session.cwd}`);
-    if (session.answerPreview) console.log(`answer: ${session.answerPreview}`);
-    const matchSummary = formatMatchSummary(session.match);
-    if (matchSummary) console.log(`match: ${matchSummary}`);
-    console.log("Try:");
-    console.log(`  cmem open ${session.sessionId}`);
-    console.log(`  cmem resume ${session.sessionId}`);
-    console.log(`  cmem pin ${session.sessionId}`);
-    console.log("");
+  if (result.fuzzyFallback) {
+    console.log(`No exact matches; showing close matches instead.`);
   }
-  console.log("Tip: Use the printed session id for filtered lists.");
+  console.log("");
+  if (!result.sessions.length) {
+    console.log(`No matches${result.text ? ` for "${result.text}"` : ""}.`);
+    console.log("Try: fewer or different words · cmem latest");
+    return;
+  }
+  for (let index = 0; index < result.sessions.length; index += 1) {
+    const session = result.sessions[index];
+    renderSessionRow(index + 1, session);
+    if (session.answerPreview) console.log(`   answer: ${firstLine(session.answerPreview)}`);
+    const matchSummary = formatMatchSummary(session.match);
+    if (matchSummary) console.log(`   match: ${matchSummary}`);
+  }
+  console.log("");
+  console.log("Try:");
+  console.log("  cmem open 1");
+  console.log("  cmem resume 1");
+  console.log("Tip: Numbers follow the list you just saw.");
 
   const distinctCwds = [...new Set(result.sessions.map((session) => session.cwd).filter(Boolean))];
   if (distinctCwds.length > 1) {
@@ -669,15 +963,20 @@ function renderFilteredList(result) {
 function renderSimpleList(result) {
   console.log(`Sessions (${result.total})`);
   console.log("");
-  for (const session of result.sessions) {
-    console.log(session.sessionId);
-    if (session.cwd) console.log(`cwd: ${session.cwd}`);
-    if (session.answerPreview) console.log(`answer: ${session.answerPreview}`);
-    console.log("Try:");
-    console.log(`  cmem open ${session.sessionId}`);
-    console.log(`  cmem resume ${session.sessionId}`);
-    console.log("");
+  if (!result.sessions.length) {
+    console.log(`No sessions${result.day ? ` on ${result.day}` : ""}.`);
+    console.log("Try: cmem latest");
+    return;
   }
+  for (let index = 0; index < result.sessions.length; index += 1) {
+    const session = result.sessions[index];
+    renderSessionRow(index + 1, session);
+    if (session.answerPreview) console.log(`   answer: ${firstLine(session.answerPreview)}`);
+  }
+  console.log("");
+  console.log("Try:");
+  console.log("  cmem open 1");
+  console.log("  cmem resume 1");
 }
 
 function renderSavedListText(result) {
@@ -696,13 +995,19 @@ function renderSavedListText(result) {
     }
     return;
   }
-  for (const session of result.sessions) {
+  for (let index = 0; index < result.sessions.length; index += 1) {
+    const session = result.sessions[index];
     const parts = [];
     if (session.bookmarked) parts.push("bookmarked");
     if (session.tags.length) parts.push(`tags=${session.tags.join(",")}`);
     if (session.note) parts.push(`note=${session.note}`);
-    console.log(`${session.sessionId}${parts.length ? `  ${parts.join("  ")}` : ""}`);
+    renderSessionRow(index + 1, session);
+    if (parts.length) console.log(`   ${parts.join("  ")}`);
   }
+  console.log("");
+  console.log("Try:");
+  console.log("  cmem open 1");
+  console.log(`  cmem open ${result.command === "bookmarks" ? "bookmark" : "saved"}:2`);
 }
 
 function renderAnnotationText(result) {
@@ -712,6 +1017,7 @@ function renderAnnotationText(result) {
   if (session.tags.length) parts.push(`tags=${session.tags.join(",")}`);
   if (session.note) parts.push(`note=${session.note}`);
   console.log(`${result.command}: ${session.sessionId}${parts.length ? `  ${parts.join("  ")}` : ""}`);
+  console.log("See it later: cmem saved");
 }
 
 function renderOpenText(result, options) {
@@ -745,9 +1051,9 @@ function renderOpenText(result, options) {
     console.log("");
     for (const item of result.items || []) {
       if (!isConversationItem(item)) continue;
-      const text = item.text || item.detail || item.preview;
+      const text = stripSystemReminders(item.text || item.detail || item.preview);
       if (!text) continue;
-      console.log(`${item.type}: ${text}`);
+      console.log(`${item.type}: ${text.length > 1600 ? `${text.slice(0, 1600)}…` : text}`);
     }
     console.log("");
   }
@@ -772,9 +1078,12 @@ function renderResumeText(result, options) {
     console.log("Resume text withheld by reload safety policy.");
   } else {
     console.log("Resume text:");
-    console.log(result.text);
+    const cleaned = stripSystemReminders(result.text);
+    console.log(cleaned || "(only system context — use --timeline via cmem open for the raw view)");
   }
   console.log("");
+  console.log(`continue in Codex: codex resume ${sessionId.replace(/^codex:/, "")}`);
+  console.log(`               or: cmem continue ${sessionId}`);
   console.log("Try:");
   console.log(`  cmem open ${sessionId}`);
   console.log(`  cmem note ${sessionId} "resume from here"`);
@@ -815,11 +1124,11 @@ function renderRepoText(project) {
 function buildThreadsBaseCommand(args) {
   const parts = ["cmem threads"];
   if (args.limitExplicit) parts.push(`--limit ${args.limitExplicit}`);
-  if (args.q) parts.push(`--q ${args.q}`);
+  if (args.q) parts.push(`--q ${quoteShellArg(args.q)}`);
   if (args.sortKey) parts.push(`--sort ${args.sortKey}`);
-  for (const provider of args.modelProviders) parts.push(`--model-provider ${provider}`);
-  for (const kind of args.sourceKinds) parts.push(`--source-kind ${kind}`);
-  if (args.cwd) parts.push(`--cwd ${args.cwd}`);
+  for (const provider of args.modelProviders) parts.push(`--model-provider ${quoteShellArg(provider)}`);
+  for (const kind of args.sourceKinds) parts.push(`--source-kind ${quoteShellArg(kind)}`);
+  if (args.cwd) parts.push(`--cwd ${quoteShellArg(args.cwd)}`);
   return parts.join(" ");
 }
 
@@ -843,9 +1152,9 @@ function renderThreadsText(result, args) {
   for (let index = 0; index < threads.length; index += 1) {
     const thread = threads[index];
     const position = index + 1;
-    console.log(`${position}. ${thread.sessionId}  updated=${thread.updatedAt || ""}  status=${thread.status.type}`);
+    console.log(`${position}. ${thread.sessionId}  updated=${formatShortTimestamp(thread.updatedAt) || thread.updatedAt || ""}  status=${thread.status.type}`);
     console.log(`provider=${thread.modelProvider || ""}  source=${thread.source || ""}  cli=${thread.cliVersion || ""}`);
-    if (thread.preview) console.log(`preview: ${thread.preview}`);
+    if (thread.preview) console.log(`preview: ${firstLine(stripSystemReminders(thread.preview) || thread.preview)}`);
     if (thread.gitInfo && (thread.gitInfo.branch || thread.gitInfo.sha)) {
       console.log(`git: ${thread.gitInfo.branch || ""} @ ${(thread.gitInfo.sha || "").slice(0, 12)}`);
     }
@@ -917,10 +1226,22 @@ function renderStatusText(result, args, runtime) {
 
 function renderDoctorText(result) {
   console.log("cmem doctor");
-  console.log(`sessions=${result.sessionCount}  files=${result.total}`);
-  for (const file of (result.files || []).slice(0, 10)) {
+  const files = result.files || [];
+  const problems = files.filter((file) => file.buildStatus !== "reused" && file.buildStatus !== "rebuilt");
+  if (result.reuseFailures > 0 || result.persistenceDegraded === true) {
+    const failures = result.reuseFailures || 0;
+    console.log(`index degraded — ${failures} ${pluralize(failures, "reuse failure")} (run: cmem doctor --rebuild)`);
+  } else {
+    console.log(`index healthy — ${result.sessionCount} ${pluralize(result.sessionCount, "session")} from ${result.total} rollout ${pluralize(result.total, "file")}`);
+  }
+  const shown = problems.length ? problems : files;
+  const displayed = Math.min(shown.length, 10);
+  for (const file of shown.slice(0, 10)) {
     console.log(`  ${file.sessionId} | ${file.buildStatus} | ${file.filePath}`);
   }
+  const remaining = problems.length ? shown.length - displayed : result.total - displayed;
+  if (remaining > 0) console.log(`  …and ${remaining} more`);
+  console.log("If results ever look stale: cmem doctor --rebuild (keeps pins/notes/tags)");
 }
 
 function renderConfigResult(result, action) {
@@ -940,56 +1261,70 @@ function renderConfigResult(result, action) {
 // --- Help -------------------------------------------------------------------
 
 function printHelp() {
-  console.log(`cmem — native front door for Codex history
+  console.log(`cmem — your Codex memory, one front door
 
-Install:
-  npm install -g .
+Look around
+  cmem                     what was I doing? (latest sessions)
+  cmem 20                  more of them
+  cmem yesterday           a specific day (also: cmem 2026-06-16)
+  cmem repo                everything for the repo you are in
 
-Exact thread commands still require a working codex CLI on PATH.
+Find
+  cmem <anything>          search all history, e.g. cmem mlir lowering
+                           (typos are OK; add words or --cwd <path> to narrow)
 
-Usage:
-  cmem [overview]
-  cmem latest [N]
-  cmem date 2026-04-09        (alias: on; also today / yesterday)
-  cmem all
-  cmem find <text> [--fuzzy]  (alias: search; all matches unless --limit)
-  cmem query <text> [--exact | --fuzzy]
-  cmem open <id | latest[:N] | N> [--timeline] [--q <text>]
-  cmem resume <id | latest[:N] | N> [--q <text>]
-  cmem repo <cwd>             (alias: project)
-  cmem threads [--limit <n>] [--cursor <c>] [--sort <k>] [--q <text>] [--archived]
-  cmem archive <id>
-  cmem unarchive <id>
-  cmem status
-  cmem doctor [--rebuild]
-  cmem saved
-  cmem bookmarks
-  cmem pin | unpin | note | clear-note | tag | untag <id | latest[:N] | N | saved[:N] | bookmark[:N]>
-  cmem use [cwd]
-  cmem config init | show | set <key> <value> | unset <key> | path
+Read & continue
+  cmem open 2              read one (numbers follow the list you just saw;
+                           free text works too: cmem open sox locomotion)
+  cmem resume 2            a paste-ready summary to reload context
+  cmem continue 2          reopen it live in Codex (codex resume)
+
+Keep
+  cmem pin 2               bookmark it   ·  cmem note 2 "why it matters"
+  cmem saved               list what you kept (open with saved:1)
+
+Health
+  cmem status              paths, index, live Codex connection
+  cmem doctor [--rebuild]  index health; --rebuild re-derives everything
+                           (pins/notes/tags always survive)
+
+Also there when you need it:
+  latest [N] · all · date <day> (alias: on) · find/search <text> [--fuzzy]
+  query <text> [--exact|--fuzzy] · repo <cwd> (alias: project)
+  threads [--limit n] [--cursor c] [--archived] · archive/unarchive <id>
+  saved · bookmarks · unpin/clear-note/tag/untag <ref> · use [cwd]
+  config init | show | set <key> <value> | unset <key> | path
 
 Options:
-  --timeline         For cmem open, force the raw recent timeline in plain text
-  --fuzzy            Lightweight typo-tolerant search for cmem find/query
+  --cwd <path>       Narrow anything to one repo
+  --limit <n>        Limit result count (> 0)
+  --fuzzy            Typo-tolerant search for cmem find/query
   --exact            Exact captured query match for cmem query
+  --q <text>         Filter inside cmem open/resume, or exact thread search for cmem threads
+  --timeline         For cmem open, raw recent timeline in plain text
+  --print            For cmem continue, print the codex command instead of launching it
   --cursor <c>       Bridge pagination cursor for cmem threads
-  --q <text>         Search/filter term for cmem open/resume, or exact thread search for cmem threads
   --sort <k>         Bridge thread sort: ${BRIDGE_THREAD_SORT_HELP_TEXT}
   --model-provider <id>  Exact bridge thread provider filter for cmem threads
   --source-kind <k>  Exact bridge thread source filter for cmem threads
                      canonical kinds: ${BRIDGE_THREAD_SOURCE_KIND_HELP_TEXT}
-  --cwd <text>       Narrow browse/thread results to one repo
+  --reload-policy <p> Resume reload safety: strict (default; may withhold with exit 2) or lenient
   --session-dir <p>  Override the Codex sessions directory
   --index-dir <p>    Override the shared history index directory
   --config <p>       Use an explicit cmem config path
   --no-config        Ignore the ~/.cmem config defaults
-  --limit <n>        Limit result count (> 0)
-  --json             Emit JSON
-  --pretty           Pretty-print JSON
+  --json / --pretty  Emit JSON
   --help             Show this message
 
-Notes:
-  bare numbers like 1 and 2 only follow latest-session order; use the printed session id for filtered lists.
+Refs: a session is a number from the last list, latest[:N], saved[:N],
+bookmark[:N], codex:<id>, or free text (unique match wins; otherwise you
+get a numbered pick list). Numbers follow the list you just saw.
+
+Power users: node history.js --help (exact bridge surfaces, raw modes, JSON everywhere)
+Install:
+  npm install -g .
+
+Exact thread commands still require a working codex CLI on PATH.
 `);
 }
 
@@ -1001,7 +1336,7 @@ async function routeCommand(store, args, context) {
 
   switch (command) {
     case "overview":
-      return { result: runOverviewCommand(store, filters, limit), render: renderLatestTextForOverview };
+      return { result: runOverviewCommand(store, filters, limit), render: renderLatestText };
     case "latest": {
       const result = runLatestCommand(store, filters, limit);
       return { result, render: () => renderLatestText(result) };
@@ -1032,6 +1367,8 @@ async function routeCommand(store, args, context) {
       return runOpenCommand(store, args, filters);
     case "resume":
       return runResumeCommand(store, args, filters);
+    case "continue":
+      return runContinueCommand(store, args, filters);
     case "repo":
     case "project": {
       const result = runRepoCommand(store, args, filters);
@@ -1079,10 +1416,6 @@ async function routeCommand(store, args, context) {
   }
 }
 
-function renderLatestTextForOverview(result) {
-  renderLatestText(result);
-}
-
 // --- Entry point ------------------------------------------------------------
 
 async function main() {
@@ -1100,6 +1433,25 @@ async function main() {
   if (args.command === "use") {
     runUseCommand(args);
     return;
+  }
+
+  // Type-what-you're-thinking routing: an unknown first token is a search
+  // (or a day view when it is date-shaped), never a dead end.
+  if (!KNOWN_COMMANDS.has(args.command)) {
+    const token = args.command;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(token) || token === "today" || token === "yesterday") {
+      args.command = "date";
+      args.positionals = [token, ...args.positionals];
+    } else if (/^\d+$/.test(token) && !args.positionals.length) {
+      if (!(parseInt(token, 10) > 0)) {
+        throw createCmemError("session count must be a positive integer — try: cmem 5");
+      }
+      args.command = "latest";
+      args.positionals = [token];
+    } else {
+      args.command = "find";
+      args.positionals = [token, ...args.positionals];
+    }
   }
 
   const runtime = args.noConfig ? null : readCmemConfig({ configPath: args.config });
@@ -1136,6 +1488,18 @@ async function main() {
     reloadPolicy: effective.reloadPolicy,
   };
 
+  // "search all history" must stay honest: when the scope comes from the
+  // ~/.cmem config rather than an explicit flag, say so once on stderr.
+  const cwdFromConfig = Boolean(!args.cwd && resolved.cwd);
+  if (
+    cwdFromConfig &&
+    ["overview", "latest", "find", "search", "query", "date", "on", "all"].includes(args.command)
+  ) {
+    console.error(`scope: ${resolved.cwd} (from cmem config; use --cwd <path> or --no-config to widen)`);
+  }
+
+  setLastListPath(effective.indexDir);
+
   const store = createHistoryStore({
     sessionDir: effective.sessionDir,
     indexRoot: effective.indexDir,
@@ -1154,6 +1518,11 @@ async function main() {
       console.log(JSON.stringify(result, null, args.pretty ? 2 : 0));
     } else if (typeof render === "function") {
       render(result);
+      // One snapshot write per rendered list, in printed order, so bare
+      // numeric refs always mean the list the user just saw (text mode only).
+      if (result && Array.isArray(result.snapshotIds) && result.snapshotIds.length) {
+        writeLastList(result.snapshotIds);
+      }
     }
 
     if (Number.isInteger(exitCode) && exitCode !== 0) {

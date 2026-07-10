@@ -894,12 +894,12 @@ describe("cmem CLI", () => {
     assert.match(output, /npm install -g \./);
     assert.doesNotMatch(output, /cd codex/);
     assert.match(output, /Exact thread commands still require a working codex CLI on PATH\./);
-    assert.match(output, /cmem latest/);
-    assert.match(output, /--timeline\s+For cmem open, force the raw recent timeline in plain text/);
-    assert.match(output, /--fuzzy\s+Lightweight typo-tolerant search for cmem find\/query/);
+    assert.match(output, /latest \[N\]/);
+    assert.match(output, /--timeline\s+For cmem open, raw recent timeline in plain text/);
+    assert.match(output, /--fuzzy\s+Typo-tolerant search for cmem find\/query/);
     assert.match(output, /--exact\s+Exact captured query match for cmem query/);
     assert.match(output, /--cursor <c>\s+Bridge pagination cursor for cmem threads/);
-    assert.match(output, /--q <text>\s+Search\/filter term for cmem open\/resume, or exact thread search for cmem threads/);
+    assert.match(output, /--q <text>\s+Filter inside cmem open\/resume, or exact thread search for cmem threads/);
     assert.match(
       output,
       new RegExp(`--sort <k>\\s+Bridge thread sort: ${escapeRegExp(BRIDGE_THREAD_SORT_HELP_TEXT)}`)
@@ -908,8 +908,9 @@ describe("cmem CLI", () => {
       output,
       new RegExp(`canonical kinds: ${escapeRegExp(BRIDGE_THREAD_SOURCE_KIND_HELP_TEXT)}`)
     );
-    assert.match(output, /cmem date 2026-04-09/);
-    assert.match(output, /bare numbers like 1 and 2 only follow latest-session order/);
+    assert.match(output, /cmem <anything>\s+search all history/);
+    assert.match(output, /cmem continue 2\s+reopen it live in Codex/);
+    assert.match(output, /Numbers follow the list you just saw/);
   });
 
   it("rejects missing native exact thread filter values", () => {
@@ -1056,7 +1057,7 @@ describe("cmem CLI", () => {
     assert.match(latestOutput, /cmem open 1/);
     assert.match(latestOutput, /cmem resume 1/);
     assert.match(latestOutput, /cmem pin 1/);
-    assert.match(latestOutput, /Tip: Bare numbers like 1 and 2 follow latest-session order\./);
+    assert.match(latestOutput, /Tip: Numbers follow the list you just saw\./);
 
     const findOutput = runCmem([
       "find",
@@ -1066,10 +1067,23 @@ describe("cmem CLI", () => {
       "--index-dir",
       indexDir,
     ]);
-    assert.match(findOutput, /cmem open codex:session-b/);
-    assert.match(findOutput, /cmem resume codex:session-b/);
-    assert.match(findOutput, /cmem pin codex:session-b/);
-    assert.match(findOutput, /Tip: Use the printed session id for filtered lists\./);
+    // Filtered lists are numbered and snapshot themselves, so numeric refs
+    // target exactly the list the user just saw.
+    assert.match(findOutput, /1\. .*codex:session-b/);
+    assert.match(findOutput, /cmem open 1/);
+    assert.match(findOutput, /cmem resume 1/);
+    assert.match(findOutput, /Tip: Numbers follow the list you just saw\./);
+
+    // A bare number now resolves against that snapshot: open 1 -> session-b.
+    const openOutput = runCmem([
+      "open",
+      "1",
+      "--session-dir",
+      tmpDir,
+      "--index-dir",
+      indexDir,
+    ]);
+    assert.match(openOutput, /codex:session-b/);
   });
 
   it("suggests narrowing filtered multi-repo results with --cwd", () => {
@@ -1732,6 +1746,11 @@ describe("cmem CLI", () => {
     assert.match(output, /Try:\n  cmem open codex:019d-thread-a\n  cmem resume codex:019d-thread-a\n  node history\.js thread codex:019d-thread-a\n  cmem archive codex:019d-thread-a/m);
     assert.match(output, /Tip: Add --cwd \/repo\/a to narrow to one repo\./);
     assert.match(output, /Next:\n  cmem threads --limit 2 --cursor cursor-1\n  cmem threads --limit 2 --archived/m);
+
+    // threads is a numbered list, so it must feed bare-N refs like every
+    // other list: the snapshot follows thread order.
+    const snapshot = JSON.parse(fs.readFileSync(path.join(indexDir, "cmem-last-list.json"), "utf8"));
+    assert.deepStrictEqual(snapshot.sessionIds, ["codex:019d-thread-a", "codex:019d-thread-b"]);
   });
 
   it("keeps common thread filters on the native cmem threads front door", () => {
@@ -2503,9 +2522,163 @@ describe("cmem CLI", () => {
     const pinned = JSON.parse(runCmem(["pin", "LATEST:2", "--json", ...shared]));
     assert.strictEqual(pinned.session.sessionId, "codex:alias-session-11");
 
-    // Unknown flags swallow their value so it never leaks into positional text.
-    const noted = JSON.parse(runCmem(["note", "latest", "keep this note", "--mystery-flag", "stray-value", "--json", ...shared]));
-    assert.strictEqual(noted.session.note, "keep this note");
+    // Unknown flags fail loudly instead of silently changing results.
+    assert.throws(
+      () => runCmem(["latest", "--mystery-flag", "3", ...shared]),
+      (err) => /unknown option: --mystery-flag/.test(String(err.stderr || err.message))
+    );
+
+    // Bare text routes to search instead of dead-ending on "unknown command".
+    const bareText = JSON.parse(runCmem(["alias", "probe", "--json", ...shared]));
+    assert.strictEqual(bareText.command, "find");
+    assert.strictEqual(bareText.total, 12);
+
+    // A bare number means "latest N".
+    const bareCount = JSON.parse(runCmem(["3", "--json", ...shared]));
+    assert.strictEqual(bareCount.command, "latest");
+    assert.strictEqual(bareCount.sessions.length, 3);
+
+    // Free-text refs resolve when unique: the pinned latest:2 session had a
+    // distinctive answer; open it by words instead of ids.
+    const freeText = runCmem(["open", "alias answer 07", ...shared]);
+    assert.match(freeText, /codex:alias-session-07/);
+  });
+
+  it("hands off to codex resume via cmem continue", () => {
+    const { tmpDir, dateADir } = makeTempSessionDir();
+    const indexDir = path.join(tmpDir, "index");
+    cleanup.push(tmpDir);
+
+    writeRollout(dateADir, "rollout-continue.jsonl", [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "019dc0de-0000-7000-8000-00000000c0de", cwd: "/repo/continue" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "turn_context",
+        payload: { turn_id: "turn-c", cwd: "/repo/continue", model: "gpt-5.4" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:53.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-c", last_agent_message: "continue target" },
+      },
+    ]);
+
+    const shared = ["--no-config", "--session-dir", tmpDir, "--index-dir", indexDir];
+
+    // --print reports the handoff without launching Codex.
+    const printed = runCmem(["continue", "latest", "--print", ...shared]);
+    assert.match(printed, /^codex resume 019dc0de-0000-7000-8000-00000000c0de$/m);
+
+    // --json is machine-readable and never spawns.
+    const asJson = JSON.parse(runCmem(["continue", "latest", "--json", ...shared]));
+    assert.strictEqual(asJson.command, "continue");
+    assert.strictEqual(asJson.sessionId, "codex:019dc0de-0000-7000-8000-00000000c0de");
+    assert.match(asJson.codexCommand, /^codex resume 019dc0de/);
+
+    // Without --print it launches `codex resume <uuid> [prompt]` from PATH.
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fake-continue-"));
+    cleanup.push(fakeBinDir);
+    const argvLog = path.join(fakeBinDir, "argv.json");
+    fs.writeFileSync(path.join(fakeBinDir, "codex"), [
+      "#!/usr/bin/env node",
+      `require("fs").writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)));`,
+    ].join("\n"));
+    fs.chmodSync(path.join(fakeBinDir, "codex"), 0o755);
+
+    const launched = runCmem(["continue", "latest", "pick up where we left off", ...shared], {
+      env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+    });
+    assert.match(launched, /continuing codex:019dc0de/);
+    // "--" delivers any prompt verbatim, including leading-dash prompts.
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(argvLog, "utf8")), [
+      "resume",
+      "019dc0de-0000-7000-8000-00000000c0de",
+      "--",
+      "pick up where we left off",
+    ]);
+  });
+
+  it("keeps honesty guards loud: empty searches, bad days, bad flags, bad counts", () => {
+    const { tmpDir, dateADir } = makeTempSessionDir();
+    const indexDir = path.join(tmpDir, "index");
+    cleanup.push(tmpDir);
+
+    writeRollout(dateADir, "rollout-honesty.jsonl", [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "honesty-session", cwd: "/repo/honesty" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "AGENTS guidance probe" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:53.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-h", last_agent_message: "done" },
+      },
+    ]);
+    const shared = ["--no-config", "--session-dir", tmpDir, "--index-dir", indexDir];
+
+    const throwsWith = (cliArgs, pattern) => {
+      assert.throws(
+        () => runCmem([...cliArgs, ...shared]),
+        (err) => pattern.test(String(err.stderr || err.message)),
+        `expected ${pattern} for: cmem ${cliArgs.join(" ")}`
+      );
+    };
+
+    // Empty searches never dump the whole archive.
+    throwsWith(["find"], /search text is required/);
+    throwsWith(["query"], /query text is required/);
+    throwsWith(["query", "--exact"], /query text is required/);
+
+    // Day views reject non-days AND impossible calendar days, and refuse
+    // to silently drop trailing words.
+    throwsWith(["date", "banana"], /is not a day/);
+    throwsWith(["2026-13-45"], /not a real calendar day/);
+    throwsWith(["today", "extra", "words"], /unexpected extra input after the day/);
+
+    // Flag typos fail loudly in both single- and double-dash shapes.
+    throwsWith(["latest", "-limit", "5"], /unknown option: -limit/);
+    throwsWith(["latest", "--limt", "5"], /unknown option: --limt/);
+
+    // A zero count is a user error, not a silent default.
+    throwsWith(["0"], /session count must be a positive integer/);
+
+    // Bare date-shaped tokens route to the day view.
+    const dayResult = JSON.parse(runCmem(["2026-04-09", "--json", ...shared]));
+    assert.strictEqual(dayResult.command, "date");
+    assert.strictEqual(dayResult.total, 1);
+
+    // 0 substring hits fall back to fuzzy with an explicit label.
+    const fallback = runCmem(["find", "AGNTS", ...shared]);
+    assert.match(fallback, /Fuzzy search for "AGNTS"/);
+    assert.match(fallback, /No exact matches; showing close matches instead\./);
+
+    // Doctor speaks in verdicts and teaches the recovery lever.
+    const doctor = runCmem(["doctor", ...shared]);
+    assert.match(doctor, /index healthy — 1 session from 1 rollout file/);
+    assert.match(doctor, /cmem doctor --rebuild \(keeps pins\/notes\/tags\)/);
+
+    // continue propagates codex's exit code and hints at unarchiving.
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fake-fail-"));
+    cleanup.push(fakeBinDir);
+    fs.writeFileSync(path.join(fakeBinDir, "codex"), "#!/usr/bin/env node\nprocess.exit(7);\n");
+    fs.chmodSync(path.join(fakeBinDir, "codex"), 0o755);
+    assert.throws(
+      () => runCmem(["continue", "latest", ...shared], {
+        env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+      }),
+      (err) => err.status === 7 && /codex exited with 7/.test(String(err.stdout || "")) &&
+        /If codex reported an archived thread: cmem unarchive codex:honesty-session/.test(String(err.stdout || ""))
+    );
   });
 
   it("fails loudly when the config file is corrupt", () => {

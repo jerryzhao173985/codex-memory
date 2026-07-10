@@ -207,15 +207,19 @@ cmem
 cmem status
 cmem latest
 cmem latest 3
+cmem 20
 cmem date today
 cmem date 2026-04-09
+cmem yesterday
 cmem all
+cmem "mlir lowering"
 cmem find "AGENTS.md"
 cmem query "feature-toggle"
 cmem open latest
 cmem open saved
 cmem resume bookmark
 cmem resume latest
+cmem continue latest
 cmem saved
 cmem pin latest
 cmem tag latest important
@@ -235,9 +239,10 @@ cmem config unset cwd
 This global package is intentionally harness-only: it installs the local history tools, not the nested upstream `codex/` checkout or the test suite.
 Exact thread workflows such as `cmem threads`, `archive`, and `unarchive` still require a working `codex` CLI on `PATH`, because the harness shells out to `codex app-server`.
 
-Use `cmem` as the simple front door:
+Use `cmem` as the simple front door. You type what you are thinking and it routes: a bare phrase searches, a bare number is the latest N, a date like `yesterday` or `2026-06-16` is that day, and an unknown first word is treated as search text rather than an error.
 
 - `cmem`: overview + latest sessions
+- `cmem <anything>`: search all history, e.g. `cmem mlir lowering` (typos tolerated; add `--cwd <path>` to scope to one repo)
 - `cmem status`: config + index + bridge health, plus saved/bookmarked counts when present
 - `cmem latest [n]`: latest sessions. The positional `n` overrides the configured default limit for this command; explicit `--limit` still overrides both.
 - `cmem date <day>`: sessions on one date
@@ -245,7 +250,8 @@ Use `cmem` as the simple front door:
 - `cmem find <text>`: broad search across sessions
 - `cmem query <text>`: captured query search by substring; add `--exact` for exact matching or `--fuzzy` for typo-tolerant matching, with a `match:` line showing the captured query that hit. When fuzzy results only come from low-signal filename/glob filters like `AGENTS.md`, `cmem` now says so explicitly and suggests `--exact`, `--cwd`, or broad `cmem find`. `--json` also exposes `match.signalTier` on query matches plus a top-level `querySignalSummary` for the current result page.
 - `cmem open <id|latest|n>`: concise conversation-first transcript view. The simple plain-text path prints a native session summary plus recent user/assistant transcript items; add `--timeline` when you want the recent raw tool/reasoning timeline in the same front door, or use `--q <text>` to narrow the transcript and get an explicit native filter summary. Use `history.js transcript` when you want the richer metadata-heavy raw timeline.
-- `cmem resume <id|latest|n>`: safe resume, `strict` by default. The simple front door now prints a concise native summary first, then the bounded resume text. `--q <text>` narrows the resume and says how many turns remain. It still uses the same exact-vs-derived resume surface as `history.js resume`, so app-server source-selection and reload-safety notes can appear when `auto` chooses exact `thread/read`.
+- `cmem resume <id|latest|n>`: safe resume, `strict` by default. The simple front door now prints a concise native summary first, then the bounded resume text. `--q <text>` narrows the resume and says how many turns remain. It still uses the same exact-vs-derived resume surface as `history.js resume`, so app-server source-selection and reload-safety notes can appear when `auto` chooses exact `thread/read`. The resume output also prints the `codex resume <uuid>` handoff.
+- `cmem continue <id|latest|n> ["prompt"]`: reopen one session live in Codex by running `codex resume <uuid>` (append a quoted prompt as the opening turn). `--print` or `--json` prints the command instead of launching it. Archived threads must be `cmem unarchive`d first, because Codex refuses to resume an archived thread.
 - `cmem saved`: bookmark-first view of all saved sessions (bookmarks, tags, or notes)
 - `cmem pin <id|latest|n>`: bookmark one session
 - `cmem tag <id|latest|n> <tag...>`: add one or more session tags
@@ -261,21 +267,18 @@ Use `cmem` as the simple front door:
 - `cmem use [cwd]`: save one default repo into `~/.cmem/config.json`
 - `cmem doctor`: deeper rollout/index diagnostics
 
-Human list output now prints `Try:` commands with the correct ref form for that view, so you can move from browse -> open -> resume without guessing.
+Every `cmem` list is numbered and timestamped, and the `Try:` footer shows the next commands, so you can move from browse -> open -> resume by row number instead of copying ids.
 
-Simple session refs work anywhere `cmem` expects one session:
+Session refs work anywhere `cmem` expects one session:
 
-- `latest`: newest session
-- `2`: second latest session in latest-session order
-- `saved`: first saved session
-- `saved:2`: second saved session
-- `bookmark`: first bookmarked session
-- `bookmark:2`: second bookmarked session
+- a bare number follows the list you just saw: every `cmem` list (overview, search, day, `saved`, `threads`) snapshots its order to `<indexDir>/cmem-last-list.json`, so `cmem open 2` means "the second row I just looked at"
+- `latest` / `latest:2`: latest-session order, regardless of the last list
+- `saved` / `saved:2`: the Nth saved (annotated) session
+- `bookmark` / `bookmark:2`: the Nth bookmarked session
+- `codex:<id>`: the exact Codex thread id
+- free text: resolved by search; a unique hit auto-resolves (with a stderr note), an ambiguous one prints a numbered pick list and exits 1
 
-Ref note:
-
-- bare numbers like `1` and `2` only follow latest-session order
-- for filtered lists like `cmem find`, `cmem date`, or `cmem all --cwd ...`, use the printed `codex:...` session id
+Unknown `--flags` are rejected instead of silently swallowing their value, and empty `find`/`date` arguments are rejected with usage, so a typo never quietly changes the result.
 
 Keep `history.js` for the deeper power-user surfaces like `events`, `artifacts`, `areas`, `area`, `family`, and `workstream`.
 

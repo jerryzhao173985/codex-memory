@@ -318,6 +318,12 @@ function buildHistoryDoctor(options = {}) {
     offset,
     limit,
     truncated: offset > 0 || (offset + limit) < fileEntries.length,
+    reuseFailures: currentManifest && currentManifest.stats
+      ? currentManifest.stats.reuseFailures || 0
+      : 0,
+    persistenceDegraded: currentManifest && currentManifest.stats
+      ? currentManifest.stats.persistenceDegraded === true
+      : false,
     counts: {
       reused: fileEntries.filter((item) => item.buildStatus === "reused").length,
       rebuilt: fileEntries.filter((item) => item.buildStatus === "rebuilt").length,

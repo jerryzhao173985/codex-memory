@@ -198,26 +198,62 @@ Best remaining targets:
 - memory citation edge cases
 - additional exact turn error variants beyond the current structured coverage
 
+### Tests That Follow The Next-Stage Roadmap
+
+Each new bridge capability from the roadmap in Best Investigation Lanes should land with two cheap protections, not a broad integration harness:
+
+- a direct seam test against a fake app-server, mirroring the fake-`codex` stdio script already used in `test/history-bridge-view.test.js`, `test/cmem-cli.test.js`, and `test/readme-smoke.test.js` — assert the request shape (including `experimentalApi` in `initialize` for experimental methods) and the parsed response
+- a feature-detect guard test: an experimental-gated method with no capability, or a stubbed method like `thread/items/list` returning `-32601`, must degrade cleanly (fall back to local search, or cache the unsupported result) instead of throwing
+
+The highest-value first target here is a `thread/search` compose test: a session that hits both the local index and the server-side ripgrep search must appear once, with its snippet preserved.
+
 ## Best Investigation Lanes
 
-These are the most promising source-code investigations if behavior changes or new features are needed.
+This is the grounded next-stage roadmap for widening how cmem uses the `codex app-server`. It is priority-ordered from the capability audit against the checked-in upstream (`codex/codex-rs`) and the installed `codex-cli 0.144.0`. Each lane names the upstream source to read first and the part of cmem it touches.
 
-### Upstream App-Server
+The bridge today sends only: `initialize`, `thread/read`, `thread/list`, `thread/loaded/list`, `thread/metadata/update`, `thread/memoryMode/set`, `thread/archive`, `thread/unarchive`, `thread/fork`, `thread/rollback`, `thread/name/set`. Experimental methods (marked `#[experimental]` in the registry) are rejected unless the bridge sets `initialize.params.capabilities.experimentalApi = true`; enforcement is in `codex/codex-rs/app-server/src/message_processor.rs`. Stable methods need no opt-in.
 
-Read these first when exact thread behavior changes:
+### 1. `thread/search` — server-side full-text search with snippets (experimental)
 
-- `codex/codex-rs/app-server/README.md`
-- `codex/codex-rs/app-server/src/filters.rs`
-- `codex/codex-rs/app-server/src/codex_message_processor.rs`
-- `codex/codex-rs/app-server-protocol/src/protocol/v2.rs`
-- `codex/codex-rs/app-server-protocol/src/protocol/thread_history.rs`
+The single biggest gap versus cmem's own session search. `thread/search` (`#[experimental("thread/search")]`, registry in `codex/codex-rs/app-server-protocol/src/protocol/common.rs`) is backed by `LocalThreadStore::search_threads` (`codex/codex-rs/thread-store/src/local/search_threads.rs`), which runs **ripgrep over rollout JSONL contents** — true full-text search of conversation bodies, not just titles — and returns the first content-match snippet per thread, newest first, including archived history via `archived: true`. Params take `searchTerm`, `cursor`, `limit`, `sortKey`, `sortDirection`, `sourceKinds`, `archived`; the response is `{ data: [{ thread, snippet }], nextCursor, backwardsCursor }` (`.../protocol/v2/thread.rs`); the handler lives in `codex/codex-rs/app-server/src/request_processors/thread_processor.rs`. Touches: `app-server-bridge.js` (add the request and set `experimentalApi` in `initialize`), `history-store-bridge.js`, and the `cmem find`/`search` lane — dedupe and compose the rg-backed snippets with the existing local substring/fuzzy index hits so one `cmem find` blends both without double-listing a session. Ship it as an experimental opt-in so a bridge without the capability still falls back to local search.
 
-### Upstream Rollout Format
+### 2. `thread/inject_items` — context-priming on resume/fork (stable)
 
-Read these first when rollout structure changes:
+The highest-leverage method for cmem-as-memory-tool. `thread/inject_items` (`common.rs`, handler in `codex/codex-rs/app-server/src/request_processors/turn_processor.rs`) appends raw Responses API items to a loaded thread's model-visible history without starting a user turn (`{ threadId, items }` → `{}`). The flow: resume or fork an old thread through the bridge, inject a distilled "where you left off" block — decisions, open TODOs, key file paths, gotchas, built from cmem's catalog and annotations — then hand off to `codex resume`, so the next turn starts already primed with zero prompt-pasting. It also enables cross-thread memory: inject knowledge recovered from thread A into a fresh thread B. Touches: the `cmem continue` lane (`bin/cmem.js` `runContinueCommand`) plus `app-server-bridge.js` (`thread/resume` + `thread/inject_items`) and a new catalog builder that turns a session doc into that distilled handoff block. Requires a loaded thread, so it only lives inside a resume/continue lane, never standalone.
 
-- `codex/codex-rs/protocol/src/protocol.rs`
-- `codex/codex-rs/rollout/src/recorder.rs`
+### 3. `thread/turns/list` — lazy paging for large threads incl. archived (experimental)
+
+cmem's thread viewer today pulls whole rollouts (`thread/read` with `includeTurns`), which is brutal for 10 MB threads. `thread/turns/list` (`common.rs`; handler `thread_processor.rs`) gives a lazy, newest-first timeline: default `sortDirection: desc`, `itemsView` of `notLoaded|summary|full`, and it reads append-only rollout storage with `include_archived: true`, so it works identically for archived threads without a resume. Known in-source caveat: it replays the entire rollout on every request until turn metadata is indexed, and it rejects not-yet-materialized/ephemeral threads. Touches: `cmem open` and the `history.js` thread view — open a recovered thread "at the present", page older turns on demand, use `summary` items for the list and `full` for a detail pane.
+
+### 4. `backwardsCursor` — live catalog refresh (cross-cutting, no new method)
+
+A free win already present on `thread/list`, `thread/search`, and `thread/turns/list` (`.../protocol/v2/thread.rs`). The contract: `backwardsCursor` is only populated on a non-empty page; pass it back as `cursor` with the **opposite** `sortDirection`, and for timestamp sorts it anchors at the page-start timestamp so same-second updates are not skipped. cmem currently pages `thread/list` forward-only. Touches: `app-server-bridge.js` `listBridgeThreads` and `cmem threads` — after rendering a page, poll backwards to pick up threads updated since the snapshot without a full rescan, which is exactly the "what changed while I reviewed" primitive a history tool wants.
+
+### 5. `thread/goal/*` — Codex-native objectives surfaced in the catalog (stable)
+
+`thread/goal/set|get|clear` (`common.rs`; processor `codex/codex-rs/app-server/src/request_processors/thread_goal_processor.rs`) is stable and gated on `Feature::Goals` (stage Stable, `default_enabled: true`, `codex/codex-rs/features/src/lib.rs`); it needs a materialized thread and the sqlite state db, but works on stored threads without resuming. A goal carries `objective`, `status` (`active|paused|blocked|usageLimited|budgetLimited|complete`), `tokenBudget`, `tokensUsed`, and `timeUsedSeconds`. Touches: the cmem annotation and catalog surface — attach a durable objective Codex itself understands ("finish the WAL-recovery refactor; budget 200k tokens"), mark recovered threads `blocked`/`complete`, and surface budget burn plus a "what was I still trying to finish" filter in the `threads`/`repo` views. This is first-class thread annotation that survives outside cmem's own overlay.
+
+### 6. `thread/delete` — purge lane guarded by cmem annotations (stable, destructive)
+
+`thread/delete` (`common.rs`; dedicated module `codex/codex-rs/app-server/src/request_processors/thread_delete.rs`) resolves the spawn subtree from the state db and hard-deletes descendants deepest-first then the root, for active **or** archived threads; missing rollout files count as already deleted. CLI parity exists (`codex delete <id|name>`). Touches: a new `cmem rm`/bulk-purge lane for the hundreds of dead one-shot threads (failed runs, subagent noise) a review workflow surfaces — with cmem's own annotations/archive acting as the safety gate before an irreversible hard delete. Keep it confirm-gated.
+
+### 7. `thread/compact/start` — compact-then-resume for oversized threads (stable)
+
+The practical companion to resume-into-Codex. An old 400k-token thread will not fit the model context, so cmem can offer "compact then resume": resume the thread via the bridge, fire `thread/compact/start` (`common.rs`; handler `thread_processor.rs` issues core `Op::Compact`, same path as the TUI `/compact`), wait for the `thread/compacted` notification, then print the `codex resume <id>` handoff. Requires a loaded thread. Combined with cmem's token-usage stats it can even suggest which recovered threads need compaction. Touches: the `cmem continue` lane and `app-server-bridge.js`.
+
+### 8. `memory/reset` — confirm-gated global memory wipe (experimental)
+
+`memory/reset` (`common.rs`; handler `thread_processor.rs`) takes no params and clears the memories db plus wipes `CODEX_HOME/memories`, while preserving per-thread memory modes. Since cmem already exposes `thread/memoryMode/set` per thread, this completes the memory-hygiene story: opt threads out individually, or factory-reset Codex's derived-memory store wholesale while cmem's own recovered-history knowledge stays intact. It is destructive and global, so it belongs behind an explicit confirm. Touches: a new cmem memory-hygiene command plus `app-server-bridge.js`.
+
+### 9. `thread/items/list` — feature-detect only, do not build yet (experimental, stubbed)
+
+`thread/items/list` (`common.rs`; handler `thread_processor.rs`) delegates to `ThreadStore::list_items`, whose trait default returns `Unsupported` (`codex/codex-rs/thread-store/src/store.rs`) with no local-store override, so every call against the default filesystem store returns JSON-RPC `-32601` ("thread/items/list is not supported yet"). Touches: nothing to build now — cmem should feature-detect by issuing one call, caching the `-32601`, and re-probing per codex release. Prefer `thread/turns/list` (lane 3) for item-level paging today.
+
+### Where To Read First
+
+- exact thread behavior: `codex/codex-rs/app-server/README.md`, `codex/codex-rs/app-server/src/message_processor.rs`, `codex/codex-rs/app-server/src/request_processors/thread_processor.rs`, `codex/codex-rs/app-server-protocol/src/protocol/common.rs`, `codex/codex-rs/app-server-protocol/src/protocol/v2/thread.rs`
+- rollout structure: `codex/codex-rs/protocol/src/protocol.rs`, `codex/codex-rs/rollout/src/recorder.rs`
+- resume/handoff CLI contract: `codex/codex-rs/cli/src/main.rs` (`ResumeCommand`); note that the app-server **rejects resuming an archived thread** ("Run `codex unarchive {id}` to unarchive it first"), so any resume/continue lane must `thread/unarchive` first
 
 ## Best Practical Next Work
 
@@ -268,13 +304,16 @@ This should stay read-only and optional.
 
 ### 4. Keep Watching Upstream Parity
 
-The current parity guardrails around thread sort keys, source kinds, and session sources are good.
+The current parity guardrails around thread sort keys, source kinds, and session sources are good, and they still bind anything shipped from the roadmap.
 
-The next useful parity work is around exact thread/read item shape, not wider API coverage.
+Broader app-server capability adoption is now tracked as the priority-ordered roadmap in Best Investigation Lanes; the near-term parity precision work outside that roadmap is around exact `thread/read` item shape.
 
 ## What Not To Do Next
 
-- do not widen the bridge into start/resume/turn execution just because upstream has those APIs
+- do not move turn execution into cmem: `thread/inject_items`, `thread/compact/start`, and `thread/settings/update` all require a loaded thread, so use them only inside a resume/continue lane that still hands off to `codex resume`; cmem stays a recovery front door, not a turn runner
+- do not widen the bridge into `thread/start` / `turn/start` / realtime execution just because upstream has those APIs
+- do not build `thread/items/list` support yet — the local filesystem store returns JSON-RPC `-32601` ("not supported yet"); feature-detect and wait, re-probing per codex release, and use `thread/turns/list` for item paging in the meantime
+- keep `thread/delete` and `memory/reset` behind an explicit confirm; both are destructive (a hard delete of a spawn subtree, a global memory wipe) with cmem's annotations/archive as the only safety gate
 - do not add fuzzy behavior to every surface without a real ranking model
 - do not keep extracting tiny helpers from `catalog.js` just to reduce line count
 - do not let docs drift back into stale path guidance or old wire names

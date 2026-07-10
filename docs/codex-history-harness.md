@@ -50,62 +50,112 @@ npm install -g .
 This installs the harness itself, not the nested upstream `codex/` checkout or the test suite.
 Exact thread workflows still require a working `codex` CLI on `PATH`, because the bridge shells out to `codex app-server`.
 
-That gives you:
+`cmem` is your Codex memory behind one front door. You type what you are thinking and it routes: a bare phrase searches, a bare number reuses the list you just saw, a date shows that day. Run `cmem --help` for the task-grouped cheat sheet. There are six things you actually do.
+
+### 1. Look around — "what was I doing?"
 
 ```bash
-cmem
-cmem status
-cmem latest
-cmem latest 3
-cmem date today
-cmem date 2026-04-09
-cmem all
-cmem find "AGENTS.md"
-cmem query "feature-toggle"
-cmem open latest
-cmem resume latest
-cmem saved
-cmem pin latest
-cmem tag latest important
-cmem note latest "resume from here"
-cmem clear-note latest
-cmem bookmarks
-cmem repo "/Users/you/repo"
-cmem threads
-cmem archive latest
-cmem unarchive latest
-cmem use .
-cmem doctor
+cmem                          # latest sessions, numbered
+cmem 20                       # the latest 20 instead of the default 10
+cmem yesterday                # one day (also: cmem 2026-06-16, cmem today)
+cmem repo                     # everything for the repo you are in
+cmem repo "/Users/you/repo"   # or name one; repo names substring-match, so cmem repo pixelforge works
 ```
 
-Use `cmem` for common flows:
+Every row is numbered and stamped with a relative time ("2h ago", "23d ago"), so yesterday's session and last month's are not two indistinguishable UUIDs.
 
-- `cmem`: overview + latest sessions
-- `cmem status`: config + index + bridge health
-- `cmem latest [n]`: latest sessions. The positional `n` overrides the configured default limit for this command; explicit `--limit` still overrides both.
-- `cmem date <day>`: one day of sessions
-- `cmem all`: all sessions
-- `cmem find <text>`: broad session search over previews, notes, tags, and captured signals
-- `cmem query <text>`: captured query search; add `--exact` for literal matching or `--fuzzy` for typo-tolerant matching
-- `cmem open <id|latest|n>`: concise conversation-first transcript view. The common plain-text path prints a native session summary plus recent user/assistant transcript items; add `--timeline` when you want the recent raw tool/reasoning timeline in the same front door, or use `--q <text>` to narrow the transcript and get an explicit native filter summary. Use `history.js transcript` when you want the richer metadata-heavy raw timeline.
-- `cmem resume <id|latest|n>`: bounded reload brief. The common plain-text path prints a concise native summary first, then the bounded resume text. `--q <text>` narrows the resume and says how many turns remain. It still uses the same exact-vs-derived resume surface as `history.js resume`, so app-server source-selection and reload-safety notes can appear when `auto` chooses exact `thread/read`.
-- `cmem repo <cwd>`: concise repo summary
-- `cmem threads`: concise exact thread list from the app-server bridge
-- `cmem archive <id|latest|n>` / `cmem unarchive <id|latest|n>`: exact thread lifecycle actions
+### 2. Find — "that session about X"
 
-Simple session refs work anywhere `cmem` expects one session:
+Just type it. An unknown first word is treated as search text, never an error:
 
-- `latest`: newest session
-- `2`: second latest session in latest-session order
-- `saved`: first saved session
-- `saved:2`: second saved session
-- `bookmark`: first bookmarked session
-- `bookmark:2`: second bookmarked session
+```bash
+cmem mlir lowering            # search everything for "mlir lowering"
+cmem AGNTS --fuzzy            # typo-tolerant; find also auto-falls back to fuzzy on 0 exact hits
+cmem mlir --cwd ~/firedrake   # scope to one repo
+```
 
-Important ref note:
+`cmem find <text>` and `cmem search <text>` are the same command spelled out. For the captured-query lane (recorded search terms rather than session text) use `cmem query <text>` — see [Search Lanes](#search-lanes) below.
 
-- bare numbers like `1` and `2` only follow latest-session order
-- for filtered lists like `cmem find`, `cmem date`, `cmem all --cwd ...`, or `cmem query --fuzzy`, use the printed `codex:...` session id
+### 3. Read — "show me that one"
+
+```bash
+cmem open 2                   # read row #2 from the list you just printed
+cmem open sox locomotion      # free text works too when it resolves to one session
+cmem open codex:019d...       # or the exact id
+```
+
+`cmem open` prints a conversation-first transcript with `<system-reminder>` harness blocks stripped out, so you see the actual conversation instead of prompt scaffolding. Add `--timeline` for the raw tool/reasoning timeline, or `--q <text>` to filter inside the transcript.
+
+### 4. Continue — "pick it back up in Codex"
+
+```bash
+cmem resume 2                 # paste-ready reload brief for that session
+cmem continue 2               # reopen it live: runs `codex resume <uuid>`
+cmem continue 2 "keep going on the bufferization fix"   # resume with an opening prompt
+```
+
+`cmem resume` shapes a bounded brief and prints the `codex resume <uuid>` handoff at the bottom. `cmem continue` skips the copy step and launches Codex for you. See [Continuing Into Codex](#continuing-into-codex) for the archived-thread caveat.
+
+### 5. Keep — "remember this one"
+
+```bash
+cmem pin 2                    # bookmark it
+cmem note 2 "why it matters"  # attach a note
+cmem tag 2 important          # add a tag
+cmem saved                    # list everything you kept
+cmem open saved:1             # open the first saved session
+```
+
+Pins, notes, and tags live in a separate annotation overlay, never in the rollout files, so they survive an index rebuild.
+
+### 6. Health — "is cmem OK?"
+
+```bash
+cmem status                   # config, index counts, live Codex connection
+cmem doctor                   # index health verdict
+cmem doctor --rebuild         # re-derive every session doc (pins/notes/tags always survive)
+```
+
+`cmem doctor` leads with a plain verdict ("index healthy — N sessions" or "index degraded — run: cmem doctor --rebuild") instead of a raw file listing.
+
+## How Refs Work
+
+Anywhere `cmem` wants one session (`open`, `resume`, `continue`, `pin`, `note`, `tag`, ...), the reference can be:
+
+- a **number** — follows the list you just saw. Every list (`cmem`, `cmem <search>`, `cmem yesterday`, `cmem saved`, `cmem threads`) snapshots its order to `<indexDir>/cmem-last-list.json`, so `cmem open 2` always means "the second row I just looked at".
+- `latest` or `latest:N` — always latest-session order, regardless of the last list. `latest` is the newest, `latest:3` the third newest.
+- `saved` / `saved:N` — the Nth saved (annotated) session.
+- `bookmark` / `bookmark:N` — the Nth bookmarked (pinned) session.
+- `codex:<id>` — the exact Codex thread id.
+- **free text** — resolved by search. A unique hit auto-resolves (with a note on stderr: `resolved "..." → codex:...`); an ambiguous phrase prints a numbered pick list and exits 1, so you rerun with `cmem open <number>`.
+
+Unknown `--flags` are rejected loudly instead of silently swallowing their value, and empty search/date arguments are rejected with usage, so a typo never quietly changes what you get back.
+
+## Continuing Into Codex
+
+`cmem continue <ref|text> ["prompt"]` hands a session back to the live Codex CLI. It resolves the ref, then runs `codex resume <uuid>` (appending your prompt as the opening turn when you pass one). With `--print` or `--json` it prints the command instead of launching it, so you can wire it into your own flow:
+
+```bash
+cmem continue 2 --print       # prints: codex resume 019d...
+cmem continue latest "resume where we left off"
+```
+
+One caveat, grounded in Codex itself: **archived threads do not resume.** The app-server rejects an archived resume with "session {id} is archived. Run `codex unarchive {id}` to unarchive it first." So if `cmem continue` fails on an archived thread, unarchive it first and retry:
+
+```bash
+cmem unarchive codex:019d...
+cmem continue codex:019d...
+```
+
+## Power Users
+
+Everything above is the friendly front door. The full surface — exact thread lists with all bridge metadata, artifacts, areas, family, workstream, raw source/history-mode overrides, and JSON on every command — lives in `history.js`:
+
+```bash
+node history.js --help
+```
+
+`cmem` composes the same store as `history.js`, so when you outgrow the six verbs you can drop down without losing anything.
 
 ## Search Lanes
 

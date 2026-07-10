@@ -570,7 +570,8 @@ describe("README command smoke tests", () => {
 
     assert.match(output, /Fuzzy captured query "dokcer" \(1\)/);
     assert.match(output, /match: query=dokcer/);
-    assert.match(output, /cmem open codex:session-a/);
+    assert.match(output, /1\. .*codex:session-a/);
+    assert.match(output, /cmem open 1/);
   });
 
   it("runs the documented cmem exact thread-list example through the local cmem entrypoint", () => {
