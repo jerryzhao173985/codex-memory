@@ -53,6 +53,14 @@ const threadPages = ${JSON.stringify(threadPages)};
 const archiveResult = ${JSON.stringify(options.archiveResult || null)};
 const unarchiveResult = ${JSON.stringify(options.unarchiveResult || null)};
 const searchResult = ${JSON.stringify(options.searchResult || null)};
+const primeThread = ${JSON.stringify(options.primeThread || null)};
+const primeLogPath = ${JSON.stringify(options.primeLogPath || null)};
+const primeCalls = [];
+function logPrimeCall(entry) {
+  if (!primeLogPath) return;
+  primeCalls.push(entry);
+  require("node:fs").writeFileSync(primeLogPath, JSON.stringify(primeCalls));
+}
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 function send(message) {
@@ -97,6 +105,30 @@ rl.on("line", (line) => {
         nextCursor: null,
       },
     });
+    return;
+  }
+
+  if (primeThread && message.method === "thread/read") {
+    logPrimeCall(["thread/read", message.params.threadId]);
+    send({ id: message.id, result: { thread: primeThread } });
+    return;
+  }
+
+  if (primeThread && message.method === "thread/fork") {
+    logPrimeCall(["thread/fork", message.params.threadId]);
+    send({ id: message.id, result: { thread: { id: primeThread.id + "-fork" } } });
+    return;
+  }
+
+  if (primeThread && message.method === "thread/resume") {
+    logPrimeCall(["thread/resume", message.params.threadId]);
+    send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+    return;
+  }
+
+  if (primeThread && message.method === "thread/inject_items") {
+    logPrimeCall(["thread/inject_items", message.params.threadId, message.params.items]);
+    send({ id: message.id, result: {} });
     return;
   }
 
@@ -2761,6 +2793,73 @@ describe("cmem CLI", () => {
       env: { ...process.env, PATH: `${plainDir}:${process.env.PATH}` },
     });
     assert.match(plainOutput, /No matches for "qzx_marker"\./);
+  });
+
+  it("primes a fork before handing off when continue --prime is used", () => {
+    const { tmpDir, dateADir } = makeTempSessionDir();
+    const indexDir = path.join(tmpDir, "index");
+    cleanup.push(tmpDir);
+
+    writeRollout(dateADir, "rollout-prime.jsonl", [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "019dc0de-1111-7000-8000-0000000000aa", cwd: "/repo/prime" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-p", last_agent_message: "prime target answer" },
+      },
+    ]);
+
+    const primeLogPath = path.join(tmpDir, "prime-calls.json");
+    const fakeCodexDir = makeFakeCodexDir({}, {
+      primeLogPath,
+      primeThread: {
+        id: "019dc0de-1111-7000-8000-0000000000aa",
+        cwd: "/repo/prime",
+        turns: [
+          {
+            id: "turn-p",
+            status: "completed",
+            startedAt: 1776171493,
+            completedAt: 1776171498,
+            items: [
+              { type: "userMessage", id: "u-p", content: [{ type: "text", text: "continue the prime work" }] },
+              { type: "agentMessage", id: "a-p", text: "prime target answer", phase: "final_answer" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const shared = ["--no-config", "--session-dir", tmpDir, "--index-dir", indexDir];
+    const env = { ...process.env, PATH: `${fakeCodexDir}:${process.env.PATH}` };
+
+    // --print never launches codex, but the prime writes DO happen through
+    // the bridge, and the handoff targets the FORK, not the source.
+    const printed = runCmem(["continue", "latest", "--prime", "--print", ...shared], { env });
+    assert.match(printed, /primed codex:019dc0de-1111-7000-8000-0000000000aa-fork \(fork of codex:019dc0de-1111-7000-8000-0000000000aa\)/);
+    assert.match(printed, /^codex resume 019dc0de-1111-7000-8000-0000000000aa-fork$/m);
+
+    const primeCalls = JSON.parse(fs.readFileSync(primeLogPath, "utf8"));
+    const writeCalls = primeCalls.filter((call) => call[0] !== "thread/read");
+    assert.deepStrictEqual(writeCalls.map((call) => call[0]), [
+      "thread/fork",
+      "thread/resume",
+      "thread/inject_items",
+    ]);
+    assert.strictEqual(writeCalls[1][1], "019dc0de-1111-7000-8000-0000000000aa-fork");
+    assert.strictEqual(writeCalls[2][1], "019dc0de-1111-7000-8000-0000000000aa-fork");
+    assert.match(writeCalls[2][2][0].content[0].text, /^<cmem_resume_context>/);
+    assert.strictEqual(writeCalls[2][2][0].role, "developer");
+
+    // Without --prime nothing is forked or injected.
+    fs.writeFileSync(primeLogPath, "[]");
+    const plain = runCmem(["continue", "latest", "--print", ...shared], { env });
+    assert.match(plain, /^codex resume 019dc0de-1111-7000-8000-0000000000aa$/m);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(primeLogPath, "utf8")), []);
   });
 
   it("fails loudly when the config file is corrupt", () => {

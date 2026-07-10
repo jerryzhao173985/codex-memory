@@ -142,6 +142,7 @@ function parseArgs(argv) {
     else if (arg === "--token-budget") args.tokenBudget = readPositiveIntegerOptionValue(argv, index, "--token-budget"), index += 1;
     else if (arg === "--clear-token-budget") args.clearTokenBudget = true;
     else if (arg === "--clear") args.clearGoal = true;
+    else if (arg === "--in-place") args.inPlace = true;
     else if (arg === "--git-branch") args.gitBranch = readRequiredOptionValue(argv, index, "--git-branch"), index += 1;
     else if (arg === "--git-sha") args.gitSha = readRequiredOptionValue(argv, index, "--git-sha"), index += 1;
     else if (arg === "--git-origin-url") args.gitOriginUrl = readRequiredOptionValue(argv, index, "--git-origin-url"), index += 1;
@@ -240,6 +241,7 @@ Usage:
   ${invocationCommand} thread-search --q <text> [--limit <n>] [--cursor <c>] [--sort <k>] [--sort-direction <d>] [--source-kind <k>] [--archived]
   ${invocationCommand} thread-turns <session_id> [--cursor <c>] [--limit <n>] [--sort-direction <d>] [--items-view <notLoaded|summary|full>]
   ${invocationCommand} goal <session_id> [--objective <text>] [--goal-status <s>] [--token-budget <n>] [--clear-token-budget] [--clear]
+  ${invocationCommand} prime <session_id> [--in-place]   (fork by default; injects the resume context block)
   ${invocationCommand} loaded [options]
   ${invocationCommand} thread <session_id> [options]
   ${invocationCommand} name <session_id> --value <text>
@@ -763,6 +765,7 @@ const {
   printBridgeThreadSearch,
   printBridgeThreadTurns,
   printBridgeGoal,
+  printBridgePrime,
   printBridgeLoadedThreads,
   printBridgeThread,
   printPruneCandidates,
@@ -816,6 +819,7 @@ const {
   printBridgeThreadSearch,
   printBridgeThreadTurns,
   printBridgeGoal,
+  printBridgePrime,
   printBridgeLoadedThreads,
   printBridgeThread,
   printBridgeThreadLifecycle,

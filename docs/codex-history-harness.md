@@ -147,6 +147,22 @@ cmem unarchive codex:019d...
 cmem continue codex:019d...
 ```
 
+### Priming: continue with the context already loaded
+
+`cmem continue <ref> --prime` goes one step further than the handoff: before launching Codex it persists a "where you left off" block into the thread's history, so the model starts the next turn already knowing the state of the work — no prompt-pasting.
+
+The block is exactly the reload-safety-governed resume text (if `cmem resume` would withhold it, priming refuses too), injected as a single developer-role message wrapped in `<cmem_resume_context>` markers. Developer role matters: Codex treats it as model-visible background, keeps it out of its auto-memory store, and hides it from transcript displays — the model sees it, the scaffold stays invisible.
+
+Priming **forks by default**, so your original thread is never touched; you continue the primed fork. `--prime-in-place` is the explicit opt-in to inject into the original thread instead:
+
+```bash
+cmem continue 2 --prime                 # fork + inject + codex resume <fork>
+cmem continue 2 --prime --print         # do the prime, print the handoff instead of launching
+cmem continue 2 --prime-in-place       # inject into the original (persisted mutation)
+```
+
+Power-CLI equivalent: `node history.js prime <session_id> [--in-place]`.
+
 ## Power Users
 
 Everything above is the friendly front door. The full surface — exact thread lists with all bridge metadata, artifacts, areas, family, workstream, raw source/history-mode overrides, and JSON on every command — lives in `history.js`:

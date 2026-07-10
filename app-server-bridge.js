@@ -174,6 +174,27 @@ class CodexAppServerBridge {
     });
   }
 
+  // Loads a stored thread into this app-server process so loaded-thread
+  // operations (inject_items, settings, compact) can follow. Archived
+  // threads are rejected upstream; unarchive first.
+  async resumeThread(sessionId) {
+    const threadId = requireBridgeThreadId(sessionId);
+    return this.request("thread/resume", { threadId });
+  }
+
+  // Appends raw Responses API items to a loaded thread's model-visible,
+  // persisted history without starting a user turn. Write path: callers own
+  // the safety gating (prime flags, fork-by-default).
+  async injectThreadItems(sessionId, items) {
+    const threadId = requireBridgeThreadId(sessionId);
+    if (!Array.isArray(items) || !items.length || items.some((item) => !item || typeof item !== "object")) {
+      const err = new Error("items must be a non-empty array of response items");
+      err.code = "APP_SERVER_INVALID_INJECT";
+      throw err;
+    }
+    return this.request("thread/inject_items", { threadId, items });
+  }
+
   async setThreadName(sessionId, name) {
     const threadId = requireBridgeThreadId(sessionId);
     const normalizedName = normalizeBridgeThreadName(name);

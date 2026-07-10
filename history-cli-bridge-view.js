@@ -147,6 +147,22 @@ function createHistoryCliBridgeView(deps = {}) {
     ].filter(Boolean).join("  "));
   }
 
+  function printBridgePrime(result, options = {}) {
+    printSourceSelectionDetails(result.source);
+    console.log([
+      "primed",
+      result.targetSessionId,
+      result.forked ? `forked_from=${result.sourceSessionId}` : "in_place=true",
+      `injected_chars=${result.injectedChars}`,
+    ].filter(Boolean).join(" | "));
+    console.log("The developer-role context block is persisted in the target thread's history.");
+    console.log("Next:");
+    console.log(`  codex resume ${String(result.targetSessionId).replace(/^codex:/, "")}`);
+    if (options.invocationCommand) {
+      console.log(`  ${options.invocationCommand} transcript ${result.targetSessionId} --source app-server`);
+    }
+  }
+
   function printBridgeLoadedThreads(result) {
     console.log(`loaded=${result.total}`);
     printSourceSelectionDetails(result.source);
@@ -335,6 +351,7 @@ function createHistoryCliBridgeView(deps = {}) {
     printBridgeThreadSearch,
     printBridgeThreadTurns,
     printBridgeGoal,
+    printBridgePrime,
     printBridgeLoadedThreads,
     printBridgeThread,
     printPruneCandidates,

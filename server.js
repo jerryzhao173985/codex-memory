@@ -427,6 +427,28 @@ function createCodexServer(options = {}) {
           return;
         }
 
+        if (req.method === "POST" && pathname === "/bridge/thread/prime" && catalogStore && typeof catalogStore.primeBridgeThread === "function") {
+          readJsonBody(req).then((data) => {
+            const sessionId = typeof data.session_id === "string" ? data.session_id : data.sessionId;
+            if (!sessionId) {
+              sendJson(res, 400, { ok: false, error: "session_id is required" });
+              return;
+            }
+            sendCatalogAsync(res, () => catalogStore.primeBridgeThread(sessionId, {
+              inPlace: data.in_place === true || data.inPlace === true,
+              reloadPolicy: data.reload_policy || data.reloadPolicy,
+              source: data.source,
+              historyMode: data.history_mode || data.historyMode,
+            }), "prime unavailable");
+          }, (err) => {
+            sendJson(res, err && err.statusCode ? err.statusCode : 400, {
+              ok: false,
+              error: err && err.message ? err.message : "bad request",
+            });
+          });
+          return;
+        }
+
         if (req.method === "GET" && pathname === "/bridge/loaded" && catalogStore && typeof catalogStore.listLoadedThreads === "function") {
           sendCatalogAsync(res, () => catalogStore.listLoadedThreads({
             limit: readOptionalQueryInteger(url.searchParams, ["limit"], { label: "limit", positive: true }),

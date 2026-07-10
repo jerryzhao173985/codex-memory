@@ -19,6 +19,7 @@ function createHistoryCliDispatch(deps = {}) {
     printBridgeThreadSearch,
     printBridgeThreadTurns,
     printBridgeGoal,
+    printBridgePrime,
     printBridgeLoadedThreads,
     printBridgeThread,
     printBridgeThreadLifecycle,
@@ -436,6 +437,10 @@ function createHistoryCliDispatch(deps = {}) {
     }
     if (args.command === "goal") {
       printBridgeGoal(output);
+      return {};
+    }
+    if (args.command === "prime") {
+      printBridgePrime(output, { invocationCommand: options.invocationCommand });
       return {};
     }
     if (args.command === "loaded") {

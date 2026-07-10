@@ -3292,6 +3292,227 @@ describe("history store", () => {
     await store.close();
   });
 
+  it("primes a fork with the resume context block via resume-then-inject", async () => {
+    writeRollout(dateDir, FILE_A, [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "prime-source", cwd: "/repo/prime" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-p" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:53.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "please fix the WAL recovery" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:54.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-p", last_agent_message: "WAL recovery fixed in wal.rs" },
+      },
+    ]);
+
+    const calls = [];
+    const store = createHistoryStore({
+      sessionDir,
+      indexRoot: indexDir,
+      refreshMs: 0,
+      appServer: {
+        // readThread makes resolution pick the exact app_server source, so
+        // the strict reload policy allows the resume text — mirroring real
+        // usage, where prime always has the bridge available.
+        async readThread(sessionId) {
+          calls.push(["thread/read", sessionId]);
+          return {
+            thread: {
+              id: String(sessionId).replace(/^codex:/, ""),
+              cwd: "/repo/prime",
+              turns: [
+                {
+                  id: "turn-p",
+                  status: "completed",
+                  startedAt: 1776171493,
+                  completedAt: 1776171498,
+                  items: [
+                    {
+                      type: "userMessage",
+                      id: "u-p",
+                      content: [{ type: "text", text: "please fix the WAL recovery" }],
+                    },
+                    {
+                      type: "agentMessage",
+                      id: "a-p",
+                      text: "WAL recovery fixed in wal.rs",
+                      phase: "final_answer",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+        },
+        async forkThread(sessionId, options = {}) {
+          calls.push(["thread/fork", sessionId, options]);
+          return { thread: { id: "prime-fork" } };
+        },
+        async resumeThread(sessionId) {
+          calls.push(["thread/resume", sessionId]);
+          return { thread: { id: sessionId } };
+        },
+        async injectThreadItems(sessionId, items) {
+          calls.push(["thread/inject_items", sessionId, items]);
+          return {};
+        },
+        close() {},
+      },
+    });
+
+    const result = await store.primeBridgeThread("codex:prime-source", { refresh: true });
+
+    // Fork by default: the source thread is never mutated.
+    assert.strictEqual(result.forked, true);
+    assert.strictEqual(result.sourceSessionId, "codex:prime-source");
+    assert.strictEqual(result.targetSessionId, "codex:prime-fork");
+    assert.ok(result.injectedChars > 0);
+
+    // Order (ignoring reads): fork, then resume the TARGET (loads it), then
+    // inject into it.
+    const writes = calls.filter((call) => call[0] !== "thread/read");
+    assert.deepStrictEqual(writes.map((call) => call[0]), [
+      "thread/fork",
+      "thread/resume",
+      "thread/inject_items",
+    ]);
+    assert.strictEqual(writes[1][1], "codex:prime-fork");
+    assert.strictEqual(writes[2][1], "codex:prime-fork");
+
+    // Payload: one developer-role message carrying the marked resume block —
+    // developer role keeps the scaffold out of Codex's auto-memory.
+    const items = writes[2][2];
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].type, "message");
+    assert.strictEqual(items[0].role, "developer");
+    assert.strictEqual(items[0].content[0].type, "input_text");
+    assert.match(items[0].content[0].text, /^<cmem_resume_context>/);
+    assert.match(items[0].content[0].text, /WAL recovery fixed in wal\.rs/);
+    assert.match(items[0].content[0].text, /<\/cmem_resume_context>$/);
+
+    // In-place is the explicit opt-in: no fork, inject into the original.
+    calls.length = 0;
+    const inPlace = await store.primeBridgeThread("codex:prime-source", { inPlace: true });
+    assert.strictEqual(inPlace.forked, false);
+    assert.strictEqual(inPlace.targetSessionId, "codex:prime-source");
+    assert.deepStrictEqual(
+      calls.filter((call) => call[0] !== "thread/read").map((call) => call[0]),
+      ["thread/resume", "thread/inject_items"]
+    );
+
+    await store.close();
+  });
+
+  it("surfaces the orphan fork id when priming fails after the fork", async () => {
+    writeRollout(dateDir, FILE_A, [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "prime-orphan", cwd: "/repo/prime" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-o", last_agent_message: "answer" },
+      },
+    ]);
+
+    const store = createHistoryStore({
+      sessionDir,
+      indexRoot: indexDir,
+      refreshMs: 0,
+      appServer: {
+        async readThread(sessionId) {
+          return {
+            thread: {
+              id: String(sessionId).replace(/^codex:/, ""),
+              cwd: "/repo/prime",
+              turns: [
+                {
+                  id: "turn-o",
+                  status: "completed",
+                  items: [
+                    { type: "userMessage", id: "u-o", content: [{ type: "text", text: "orphan probe" }] },
+                    { type: "agentMessage", id: "a-o", text: "answer", phase: "final_answer" },
+                  ],
+                },
+              ],
+            },
+          };
+        },
+        async forkThread() {
+          return { thread: { id: "orphan-fork" } };
+        },
+        async resumeThread() {
+          throw new Error("thread load failed");
+        },
+        async injectThreadItems() {
+          throw new Error("should not reach inject");
+        },
+        close() {},
+      },
+    });
+
+    await assert.rejects(
+      store.primeBridgeThread("codex:prime-orphan", { refresh: true }),
+      (err) => /thread load failed/.test(err.message) &&
+        /fork created: codex:orphan-fork/.test(err.message) &&
+        /cmem archive codex:orphan-fork/.test(err.message)
+    );
+
+    await store.close();
+  });
+
+  it("refuses to prime when reload safety withholds the resume text", async () => {
+    // No readThread on the fake bridge: resolution falls back to the
+    // limited rollout view, which the strict policy blocks — and prime must
+    // refuse rather than inject unsafe context.
+    writeRollout(dateDir, FILE_A, [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "prime-blocked", cwd: "/repo/prime" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "blocked source" },
+      },
+    ]);
+
+    let injected = false;
+    const store = createHistoryStore({
+      sessionDir,
+      indexRoot: indexDir,
+      refreshMs: 0,
+      appServer: {
+        async forkThread() { return { thread: { id: "never" } }; },
+        async resumeThread() { return {}; },
+        async injectThreadItems() { injected = true; return {}; },
+        close() {},
+      },
+    });
+
+    await assert.rejects(
+      store.primeBridgeThread("codex:prime-blocked", { reloadPolicy: "strict", refresh: true }),
+      (err) => err && err.code === "HISTORY_RELOAD_BLOCKED" && /refusing to prime/.test(err.message)
+    );
+    assert.strictEqual(injected, false, "a blocked resume must never inject");
+
+    await store.close();
+  });
+
   it("recomputes prune selection against the fork snapshot before rollback", async () => {
     const threads = new Map();
 

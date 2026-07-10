@@ -20,6 +20,7 @@ const BRIDGE_HISTORY_COMMANDS = new Set([
   "prune-turns",
   "prune-preview",
   "fork-prune",
+  "prime",
 ]);
 
 function buildBridgeMetadataPatchFromArgs(args = {}) {
@@ -131,6 +132,16 @@ async function runHistoryBridgeCommand(store, args = {}, options = {}) {
       status: args.goalStatus,
       tokenBudget: args.tokenBudget,
       clearTokenBudget: args.clearTokenBudget === true,
+    });
+  }
+
+  if (args.command === "prime") {
+    const sessionId = requireBridgeSessionId(args, makeError);
+    return store.primeBridgeThread(sessionId, {
+      inPlace: args.inPlace === true,
+      reloadPolicy: args.reloadPolicy,
+      source: args.source,
+      historyMode: args.historyMode,
     });
   }
 

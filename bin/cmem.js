@@ -174,6 +174,8 @@ function parseArgs(argv) {
     else if (arg === "--force") args.force = true;
     else if (arg === "--rebuild") args.rebuild = true;
     else if (arg === "--print") args.print = true;
+    else if (arg === "--prime") args.prime = true;
+    else if (arg === "--prime-in-place") { args.prime = true; args.primeInPlace = true; }
     else if (arg === "--session-dir") { args.sessionDir = readRequiredOptionValue(argv, index, "--session-dir"); index += 1; }
     else if (arg === "--index-dir") { args.indexDir = readRequiredOptionValue(argv, index, "--index-dir"); index += 1; }
     else if (arg === "--config") { args.config = readRequiredOptionValue(argv, index, "--config"); index += 1; }
@@ -678,19 +680,54 @@ function buildCodexResumeCommand(sessionId, prompt) {
   };
 }
 
-function runContinueCommand(store, args, filters) {
+async function runContinueCommand(store, args, filters) {
   const ref = args.positionals[0] || "latest";
   const sessionId = resolveSessionRef(store, ref, filters);
   const prompt = args.positionals.slice(1).join(" ");
-  const handoff = buildCodexResumeCommand(sessionId, prompt);
-  const payload = { command: "continue", sessionId, codexCommand: handoff.display };
+
+  // --prime: persist a "where you left off" context block (the reload-safety-
+  // governed resume text) into the thread before handing off. Forks by
+  // default so the original thread is never mutated; --prime-in-place is the
+  // explicit opt-in to inject into the original.
+  let prime = null;
+  let targetSessionId = sessionId;
+  if (args.prime) {
+    prime = await store.primeBridgeThread(sessionId, {
+      inPlace: args.primeInPlace === true,
+      reloadPolicy: filters.reloadPolicy,
+      source: filters.source,
+      historyMode: filters.historyMode,
+    });
+    targetSessionId = prime.targetSessionId;
+  }
+
+  const handoff = buildCodexResumeCommand(targetSessionId, prompt);
+  const payload = { command: "continue", sessionId: targetSessionId, codexCommand: handoff.display };
+  if (prime) {
+    payload.primed = {
+      sourceSessionId: prime.sourceSessionId,
+      forked: prime.forked,
+      injectedChars: prime.injectedChars,
+    };
+  }
 
   // --json (or --print) reports the handoff instead of launching Codex.
   if (args.json || args.print) {
-    return { result: payload, render: () => console.log(handoff.display) };
+    return {
+      result: payload,
+      render: () => {
+        if (prime) {
+          console.log(`primed ${targetSessionId}${prime.forked ? ` (fork of ${prime.sourceSessionId})` : " (in place)"} with ${prime.injectedChars} chars of context`);
+        }
+        console.log(handoff.display);
+      },
+    };
   }
 
-  console.log(`continuing ${sessionId} in Codex…`);
+  if (prime) {
+    console.log(`primed ${targetSessionId}${prime.forked ? ` (fork of ${prime.sourceSessionId})` : " (in place)"} with ${prime.injectedChars} chars of context`);
+  }
+  console.log(`continuing ${targetSessionId} in Codex…`);
   const child = spawnSync("codex", handoff.argv, { stdio: "inherit" });
   if (child.error) {
     throw createCmemError(`could not launch codex: ${child.error.message} — is the codex CLI on PATH?`);
@@ -704,7 +741,7 @@ function runContinueCommand(store, args, filters) {
     render: () => {
       if (exitCode !== 0) {
         console.log(child.signal ? `codex was terminated by ${child.signal}.` : `codex exited with ${exitCode}.`);
-        console.log(`If codex reported an archived thread: cmem unarchive ${sessionId}  then retry.`);
+        console.log(`If codex reported an archived thread: cmem unarchive ${targetSessionId}  then retry.`);
       }
     },
   };
@@ -1325,6 +1362,9 @@ Read & continue
                            free text works too: cmem open sox locomotion)
   cmem resume 2            a paste-ready summary to reload context
   cmem continue 2          reopen it live in Codex (codex resume)
+  cmem continue 2 --prime  same, but first inject a "where you left off"
+                           context block into a fresh fork (original thread
+                           untouched; --prime-in-place injects the original)
 
 Keep
   cmem pin 2               bookmark it   ·  cmem note 2 "why it matters"
@@ -1350,6 +1390,9 @@ Options:
   --q <text>         Filter inside cmem open/resume, or exact thread search for cmem threads
   --timeline         For cmem open, raw recent timeline in plain text
   --print            For cmem continue, print the codex command instead of launching it
+  --prime            For cmem continue, persist the resume context block into a fresh fork first
+                     (always writes, even with --print/--json; each run creates a new fork)
+  --prime-in-place   Same, but inject into the original thread (explicit opt-in mutation)
   --cursor <c>       Bridge pagination cursor for cmem threads
   --sort <k>         Bridge thread sort: ${BRIDGE_THREAD_SORT_HELP_TEXT}
   --model-provider <id>  Exact bridge thread provider filter for cmem threads

@@ -232,6 +232,31 @@ function createHistoryStoreBridge(options = {}) {
       if (!response || !response.thread || typeof response.thread !== "object") return null;
       return buildBridgeThreadViewResult(response.thread);
     },
+    // Primitives for the prime flow (fork-by-default context injection).
+    async forkBridgeThread(sessionId) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.forkThread !== "function") throw createUnavailableBridgeError();
+      const response = await bridge.forkThread(sessionId, { ephemeral: false });
+      const forkSessionId = prefixedSessionId(response && response.thread && response.thread.id);
+      if (!forkSessionId) {
+        const err = new Error("thread/fork response missing thread id");
+        err.code = "APP_SERVER_INVALID_RESPONSE";
+        throw err;
+      }
+      return { sessionId: forkSessionId };
+    },
+    async resumeBridgeThread(sessionId) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.resumeThread !== "function") throw createUnavailableBridgeError();
+      return bridge.resumeThread(sessionId);
+    },
+    async injectBridgeThreadItems(sessionId, items) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.injectThreadItems !== "function") throw createUnavailableBridgeError();
+      await bridge.injectThreadItems(sessionId, items);
+      invalidateBuildCache();
+      return { injected: items.length };
+    },
     async forkPruneThread(sessionId, filters = {}) {
       const bridge = getAppServer();
       if (
