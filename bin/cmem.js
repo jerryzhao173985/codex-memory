@@ -185,6 +185,7 @@ function parseArgs(argv) {
     else if (arg === "--q") { args.q = readRequiredOptionValue(argv, index, "--q"); index += 1; }
     else if (arg === "--cursor") { args.cursor = readRequiredOptionValue(argv, index, "--cursor"); index += 1; }
     else if (arg === "--sort" || arg === "--sort-key") { args.sortKey = readRequiredOptionValue(argv, index, "--sort"); index += 1; }
+    else if (arg === "--sort-direction") { args.sortDirection = readRequiredOptionValue(argv, index, "--sort-direction"); index += 1; }
     else if (arg === "--model-provider") { args.modelProviders.push(readRequiredOptionValue(argv, index, "--model-provider")); index += 1; }
     else if (arg === "--source-kind") { args.sourceKinds.push(readRequiredOptionValue(argv, index, "--source-kind")); index += 1; }
     else if (arg === "--limit") {
@@ -459,7 +460,7 @@ function runAllCommand(store, filters) {
   }, (result.sessions || []).map((session) => session.sessionId));
 }
 
-function runFindCommand(store, args, filters, limit) {
+async function runFindCommand(store, args, filters, limit) {
   const text = args.positionals.join(" ").trim();
   if (!text) {
     throw createCmemError('search text is required — try: cmem <words>, e.g. cmem mlir lowering');
@@ -490,8 +491,28 @@ function runFindCommand(store, args, filters, limit) {
       fuzzyFallback = true;
     }
   }
+  // Last resort when the local index has nothing: the exact bridge lane runs
+  // ripgrep over raw rollout contents server-side (finds text the bounded
+  // index missed, including archived threads). Silent when the bridge or the
+  // experimental method is unavailable — the local result stands.
+  let bridgeMatches;
+  if (result.total === 0 && !args.fuzzy) {
+    try {
+      const bridgeResult = await store.searchBridgeThreads({ q: text, limit: 10 });
+      bridgeMatches = (bridgeResult.threads || []).map((thread) => ({
+        sessionId: thread.sessionId,
+        cwd: thread.cwd || "",
+        updatedAt: thread.updatedAt || null,
+        name: thread.name || null,
+        snippet: thread.snippet || "",
+      }));
+    } catch {
+      bridgeMatches = undefined;
+    }
+  }
+
   const title = qMode === "fuzzy" ? `Fuzzy search for "${text}"` : `Search for "${text}"`;
-  return attachSnapshotIds({
+  const envelope = attachSnapshotIds({
     command: "find",
     matchMode: qMode,
     fuzzyFallback,
@@ -499,7 +520,11 @@ function runFindCommand(store, args, filters, limit) {
     text,
     total: result.total,
     sessions: (result.sessions || []).map((session) => buildSessionCard(session, { match: true })),
-  }, (result.sessions || []).map((session) => session.sessionId));
+  }, bridgeMatches && bridgeMatches.length
+    ? bridgeMatches.map((match) => match.sessionId)
+    : (result.sessions || []).map((session) => session.sessionId));
+  if (bridgeMatches && bridgeMatches.length) envelope.bridgeMatches = bridgeMatches;
+  return envelope;
 }
 
 function runQueryCommand(store, args, filters, limit) {
@@ -720,6 +745,7 @@ async function runThreadsCommand(store, args, filters) {
     limit: args.limitExplicit,
     cursor: args.cursor,
     sortKey: args.sortKey,
+    sortDirection: args.sortDirection,
     q: args.q,
     cwd: args.cwd,
     archived: args.archived,
@@ -932,6 +958,20 @@ function renderFilteredList(result) {
   }
   console.log("");
   if (!result.sessions.length) {
+    if (Array.isArray(result.bridgeMatches) && result.bridgeMatches.length) {
+      console.log(`Nothing in the local index, but exact full-text search over raw rollouts found ${result.bridgeMatches.length}:`);
+      console.log("");
+      for (let index = 0; index < result.bridgeMatches.length; index += 1) {
+        const match = result.bridgeMatches[index];
+        renderSessionRow(index + 1, match);
+        if (match.snippet) console.log(`   snippet: ${firstLine(match.snippet)}`);
+      }
+      console.log("");
+      console.log("Try:");
+      console.log("  cmem open 1");
+      console.log("Tip: Numbers follow the list you just saw.");
+      return;
+    }
     console.log(`No matches${result.text ? ` for "${result.text}"` : ""}.`);
     console.log("Try: fewer or different words · cmem latest");
     return;
@@ -1172,11 +1212,18 @@ function renderThreadsText(result, args) {
     console.log(`Tip: Add --cwd ${distinctCwds[0]} to narrow to one repo.`);
   }
 
-  if (result.nextCursor) {
+  if (result.nextCursor || result.backwardsCursor) {
     const base = buildThreadsBaseCommand(args);
     console.log("Next:");
-    console.log(`  ${base} --cursor ${result.nextCursor}`);
-    console.log(`  ${base} --archived`);
+    if (result.nextCursor) {
+      console.log(`  ${base} --cursor ${result.nextCursor}`);
+      console.log(`  ${base} --archived`);
+    }
+    if (result.backwardsCursor) {
+      const currentDirection = String(args.sortDirection || "desc").toLowerCase().startsWith("asc") ? "asc" : "desc";
+      const flippedDirection = currentDirection === "asc" ? "desc" : "asc";
+      console.log(`  ${base} --cursor ${result.backwardsCursor} --sort-direction ${flippedDirection}   (${flippedDirection === "asc" ? "newer" : "older"} from page start)`);
+    }
   }
 }
 
@@ -1356,7 +1403,7 @@ async function routeCommand(store, args, context) {
     case "search": {
       // Search is a recovery surface: never silently cap hits unless the user
       // asked for a limit.
-      const result = runFindCommand(store, args, filters, args.limitExplicit ?? REF_LOOKUP_LIMIT);
+      const result = await runFindCommand(store, args, filters, args.limitExplicit ?? REF_LOOKUP_LIMIT);
       return { result, render: () => renderFilteredList(result) };
     }
     case "query": {

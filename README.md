@@ -383,6 +383,10 @@ Path lookup notes:
 - `GET /events`
 - `GET /analytics`
 - `GET /bridge/threads`
+- `GET /bridge/thread-search`
+- `GET /bridge/thread-turns`
+- `GET /bridge/thread/goal`
+- `POST /bridge/thread/goal`
 - `GET /bridge/loaded`
 - `GET /bridge/thread`
 - `GET /bridge/prune-turns`

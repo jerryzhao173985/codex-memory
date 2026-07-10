@@ -7,6 +7,9 @@ const {
 
 const BRIDGE_HISTORY_COMMANDS = new Set([
   "threads",
+  "thread-search",
+  "thread-turns",
+  "goal",
   "loaded",
   "thread",
   "name",
@@ -85,6 +88,51 @@ function buildPruneOptions(args = {}) {
 async function runHistoryBridgeCommand(store, args = {}, options = {}) {
   if (!BRIDGE_HISTORY_COMMANDS.has(args.command)) return undefined;
   const makeError = createBridgeErrorFactory(options.errorFactory);
+
+  if (args.command === "thread-search") {
+    if (typeof args.q !== "string" || !args.q.trim()) {
+      throw makeError("--q <text> is required for thread-search");
+    }
+    return store.searchBridgeThreads({
+      q: args.q,
+      limit: args.limit,
+      cursor: args.cursor,
+      sortKey: args.sortKey,
+      sortDirection: args.sortDirection,
+      sourceKinds: args.sourceKinds,
+      archived: args.archived,
+    });
+  }
+
+  if (args.command === "thread-turns") {
+    const sessionId = requireBridgeSessionId(args, makeError);
+    return store.listBridgeThreadTurns(sessionId, {
+      cursor: args.cursor,
+      limit: args.limit,
+      sortDirection: args.sortDirection,
+      itemsView: args.itemsView,
+    });
+  }
+
+  if (args.command === "goal") {
+    const sessionId = requireBridgeSessionId(args, makeError);
+    if (args.clearGoal === true) {
+      return store.clearBridgeThreadGoal(sessionId);
+    }
+    const hasMutation = args.objective !== undefined ||
+      args.goalStatus !== undefined ||
+      args.tokenBudget !== undefined ||
+      args.clearTokenBudget === true;
+    if (!hasMutation) {
+      return store.getBridgeThreadGoal(sessionId);
+    }
+    return store.setBridgeThreadGoal(sessionId, {
+      objective: args.objective,
+      status: args.goalStatus,
+      tokenBudget: args.tokenBudget,
+      clearTokenBudget: args.clearTokenBudget === true,
+    });
+  }
 
   if (args.command === "threads") {
     return store.listBridgeThreads({

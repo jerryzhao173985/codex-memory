@@ -4,6 +4,9 @@ const { prefixedSessionId } = require("./history-session-id");
 const {
   attachBridgeOperationSource,
   normalizeBridgeListResponse,
+  normalizeBridgeSearchResponse,
+  normalizeBridgeTurnsListResponse,
+  normalizeBridgeGoal,
   normalizeBridgeLoadedResponse,
   normalizeBridgeThreadLifecycleResult,
   normalizeBridgeThreadMemoryModeResult,
@@ -102,6 +105,47 @@ function createHistoryStoreBridge(options = {}) {
 
       const response = await bridge.listLoadedThreads(normalizeBridgeLoadedListParams(filters));
       return attachBridgeOperationSource(normalizeBridgeLoadedResponse(response));
+    },
+    async searchBridgeThreads(filters = {}) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.searchThreads !== "function") throw createUnavailableBridgeError();
+
+      const response = await bridge.searchThreads(filters);
+      return attachBridgeOperationSource(normalizeBridgeSearchResponse(response));
+    },
+    async listBridgeThreadTurns(sessionId, filters = {}) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.listThreadTurns !== "function") throw createUnavailableBridgeError();
+
+      const response = await bridge.listThreadTurns(sessionId, filters);
+      return attachBridgeOperationSource(normalizeBridgeTurnsListResponse(response));
+    },
+    async getBridgeThreadGoal(sessionId) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.getThreadGoal !== "function") throw createUnavailableBridgeError();
+
+      const response = await bridge.getThreadGoal(sessionId);
+      return attachBridgeOperationSource({
+        goal: normalizeBridgeGoal(response && response.goal),
+      });
+    },
+    async setBridgeThreadGoal(sessionId, patch = {}) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.setThreadGoal !== "function") throw createUnavailableBridgeError();
+
+      const response = await bridge.setThreadGoal(sessionId, patch);
+      return attachBridgeOperationSource({
+        goal: normalizeBridgeGoal(response && response.goal),
+      });
+    },
+    async clearBridgeThreadGoal(sessionId) {
+      const bridge = getAppServer();
+      if (!bridge || typeof bridge.clearThreadGoal !== "function") throw createUnavailableBridgeError();
+
+      const response = await bridge.clearThreadGoal(sessionId);
+      return attachBridgeOperationSource({
+        cleared: Boolean(response && response.cleared),
+      });
     },
     async getBridgeThread(sessionId, filters = {}) {
       const thread = await readBridgeThreadRequired(sessionId, {

@@ -136,6 +136,12 @@ function parseArgs(argv) {
     else if (arg === "--sort-direction") args.sortDirection = readRequiredOptionValue(argv, index, "--sort-direction"), index += 1;
     else if (arg === "--state-db-only") args.useStateDbOnly = true;
     else if (arg === "--rebuild") args.rebuild = true;
+    else if (arg === "--items-view") args.itemsView = readRequiredOptionValue(argv, index, "--items-view"), index += 1;
+    else if (arg === "--objective") args.objective = readRequiredOptionValue(argv, index, "--objective"), index += 1;
+    else if (arg === "--goal-status") args.goalStatus = readRequiredOptionValue(argv, index, "--goal-status"), index += 1;
+    else if (arg === "--token-budget") args.tokenBudget = readPositiveIntegerOptionValue(argv, index, "--token-budget"), index += 1;
+    else if (arg === "--clear-token-budget") args.clearTokenBudget = true;
+    else if (arg === "--clear") args.clearGoal = true;
     else if (arg === "--git-branch") args.gitBranch = readRequiredOptionValue(argv, index, "--git-branch"), index += 1;
     else if (arg === "--git-sha") args.gitSha = readRequiredOptionValue(argv, index, "--git-sha"), index += 1;
     else if (arg === "--git-origin-url") args.gitOriginUrl = readRequiredOptionValue(argv, index, "--git-origin-url"), index += 1;
@@ -231,6 +237,9 @@ Usage:
   ${invocationCommand} search --q <text> [options]
   ${invocationCommand} schema [options]
   ${invocationCommand} threads [options]
+  ${invocationCommand} thread-search --q <text> [--limit <n>] [--cursor <c>] [--sort <k>] [--sort-direction <d>] [--source-kind <k>] [--archived]
+  ${invocationCommand} thread-turns <session_id> [--cursor <c>] [--limit <n>] [--sort-direction <d>] [--items-view <notLoaded|summary|full>]
+  ${invocationCommand} goal <session_id> [--objective <text>] [--goal-status <s>] [--token-budget <n>] [--clear-token-budget] [--clear]
   ${invocationCommand} loaded [options]
   ${invocationCommand} thread <session_id> [options]
   ${invocationCommand} name <session_id> --value <text>
@@ -290,6 +299,11 @@ Options:
   --sort <k>        Bridge thread sort: ${BRIDGE_THREAD_SORT_HELP_TEXT}
   --sort-direction <d> Bridge thread sort direction: asc or desc
   --state-db-only   Bridge thread list from the state DB only (skip JSONL repair scan)
+  --items-view <v>  thread-turns detail level: notLoaded, summary (default), or full
+  --objective <t>   Goal objective text for goal set
+  --goal-status <s> Goal status: active, paused, blocked, usageLimited, budgetLimited, complete
+  --token-budget <n> Goal token budget (> 0); --clear-token-budget removes it
+  --clear           Goal only: clear the thread goal
   --through-turn <id> Keep history through this turn and drop newer turns
   --drop-last <n>   Drop the last N turns in prune preview / fork-prune (> 0)
   --name <text>     Name to apply to a newly forked pruned thread
@@ -746,6 +760,9 @@ const {
 const {
   buildBridgeThreadListHints,
   printBridgeThreadList,
+  printBridgeThreadSearch,
+  printBridgeThreadTurns,
+  printBridgeGoal,
   printBridgeLoadedThreads,
   printBridgeThread,
   printPruneCandidates,
@@ -796,6 +813,9 @@ const {
   printAreaDetail,
   printSchemaProfile,
   printBridgeThreadList,
+  printBridgeThreadSearch,
+  printBridgeThreadTurns,
+  printBridgeGoal,
   printBridgeLoadedThreads,
   printBridgeThread,
   printBridgeThreadLifecycle,

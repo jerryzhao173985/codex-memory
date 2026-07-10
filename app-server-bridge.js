@@ -14,6 +14,9 @@ const {
   normalizeBridgeThreadMemoryMode,
   requireBridgeGitInfoPatch,
   normalizeBridgeThreadListParams,
+  normalizeBridgeThreadSearchParams,
+  normalizeBridgeTurnsListParams,
+  normalizeBridgeGoalSetPatch,
   normalizeBridgeLoadedListParams,
   normalizeBridgeRollbackTurns,
   normalizeBridgeThreadName,
@@ -62,6 +65,39 @@ class CodexAppServerBridge {
 
   async listLoadedThreads(params = {}) {
     return this.request("thread/loaded/list", normalizeBridgeLoadedListParams(params));
+  }
+
+  // Server-side ripgrep full-text search over rollout contents (experimental;
+  // the transport opts in to experimentalApi by default).
+  async searchThreads(params = {}) {
+    return this.request("thread/search", normalizeBridgeThreadSearchParams(params));
+  }
+
+  // Paged turn history without resuming; works for stored and archived threads.
+  async listThreadTurns(sessionId, params = {}) {
+    const threadId = requireBridgeThreadId(sessionId);
+    return this.request("thread/turns/list", {
+      threadId,
+      ...normalizeBridgeTurnsListParams(params),
+    });
+  }
+
+  async getThreadGoal(sessionId) {
+    const threadId = requireBridgeThreadId(sessionId);
+    return this.request("thread/goal/get", { threadId });
+  }
+
+  async setThreadGoal(sessionId, patch = {}) {
+    const threadId = requireBridgeThreadId(sessionId);
+    return this.request("thread/goal/set", {
+      threadId,
+      ...normalizeBridgeGoalSetPatch(patch),
+    });
+  }
+
+  async clearThreadGoal(sessionId) {
+    const threadId = requireBridgeThreadId(sessionId);
+    return this.request("thread/goal/clear", { threadId });
   }
 
   async updateThreadMetadata(sessionId, patch = {}) {

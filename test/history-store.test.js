@@ -3164,6 +3164,113 @@ describe("history store", () => {
     });
   });
 
+  it("exposes bridge thread search, lazy turn pages, and goals with normalized wire params", async () => {
+    const calls = [];
+    const store = createHistoryStore({
+      sessionDir,
+      indexRoot: indexDir,
+      refreshMs: 0,
+      appServer: {
+        async searchThreads(params) {
+          calls.push(["thread/search", params]);
+          return {
+            data: [
+              {
+                thread: {
+                  id: "019d-search-hit",
+                  preview: "matched thread",
+                  cwd: "/repo/search",
+                  updatedAt: 1776376184,
+                  status: { type: "notLoaded", activeFlags: [] },
+                },
+                snippet: "…the WAL corruption line…",
+              },
+            ],
+            nextCursor: "older-cursor",
+            backwardsCursor: "newer-cursor",
+          };
+        },
+        async listThreadTurns(sessionId, params) {
+          calls.push(["thread/turns/list", sessionId, params]);
+          return {
+            data: [
+              { id: "turn-2", status: "completed", itemsView: "summary" },
+              { id: "turn-1", status: "completed", itemsView: "summary" },
+            ],
+            nextCursor: "turn-cursor",
+            backwardsCursor: null,
+          };
+        },
+        async getThreadGoal(sessionId) {
+          calls.push(["thread/goal/get", sessionId]);
+          return {
+            goal: {
+              threadId: "019d-goal-thread",
+              objective: "finish the WAL refactor",
+              status: "active",
+              tokenBudget: 200000,
+              tokensUsed: 51234,
+              timeUsedSeconds: 4200.5,
+              createdAt: 1776300000,
+              updatedAt: 1776376184,
+            },
+          };
+        },
+        async setThreadGoal(sessionId, patch) {
+          calls.push(["thread/goal/set", sessionId, patch]);
+          return {
+            goal: {
+              threadId: "019d-goal-thread",
+              objective: patch.objective || "finish the WAL refactor",
+              status: patch.status || "active",
+              tokenBudget: patch.tokenBudget === undefined ? 200000 : patch.tokenBudget,
+              tokensUsed: 51234,
+              timeUsedSeconds: 4200.5,
+              createdAt: 1776300000,
+              updatedAt: 1776376999,
+            },
+          };
+        },
+        async clearThreadGoal(sessionId) {
+          calls.push(["thread/goal/clear", sessionId]);
+          return { cleared: true };
+        },
+        close() {},
+      },
+    });
+
+    const search = await store.searchBridgeThreads({ q: "WAL corruption", limit: 5 });
+    assert.strictEqual(search.total, 1);
+    assert.strictEqual(search.threads[0].sessionId, "codex:019d-search-hit");
+    assert.strictEqual(search.threads[0].snippet, "…the WAL corruption line…");
+    assert.strictEqual(search.nextCursor, "older-cursor");
+    assert.strictEqual(search.backwardsCursor, "newer-cursor");
+    assert.strictEqual(search.source.selectionReason, "app_server_only_operation");
+
+    const turns = await store.listBridgeThreadTurns("codex:019d-goal-thread", {
+      limit: 2,
+      itemsView: "summary",
+    });
+    assert.strictEqual(turns.total, 2);
+    assert.strictEqual(turns.turns[0].id, "turn-2");
+    assert.strictEqual(turns.nextCursor, "turn-cursor");
+
+    const goal = await store.getBridgeThreadGoal("codex:019d-goal-thread");
+    assert.strictEqual(goal.goal.sessionId, "codex:019d-goal-thread");
+    assert.strictEqual(goal.goal.objective, "finish the WAL refactor");
+    assert.strictEqual(goal.goal.tokenBudget, 200000);
+
+    const updated = await store.setBridgeThreadGoal("codex:019d-goal-thread", {
+      status: "complete",
+    });
+    assert.strictEqual(updated.goal.status, "complete");
+
+    const cleared = await store.clearBridgeThreadGoal("codex:019d-goal-thread");
+    assert.strictEqual(cleared.cleared, true);
+
+    await store.close();
+  });
+
   it("recomputes prune selection against the fork snapshot before rollback", async () => {
     const threads = new Map();
 

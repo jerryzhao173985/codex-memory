@@ -16,6 +16,9 @@ function createHistoryCliDispatch(deps = {}) {
     printAreaDetail,
     printSchemaProfile,
     printBridgeThreadList,
+    printBridgeThreadSearch,
+    printBridgeThreadTurns,
+    printBridgeGoal,
     printBridgeLoadedThreads,
     printBridgeThread,
     printBridgeThreadLifecycle,
@@ -421,6 +424,18 @@ function createHistoryCliDispatch(deps = {}) {
     }
     if (args.command === "threads") {
       printBridgeThreadList(output, { invocationCommand: options.invocationCommand });
+      return {};
+    }
+    if (args.command === "thread-search") {
+      printBridgeThreadSearch(output, { invocationCommand: options.invocationCommand });
+      return {};
+    }
+    if (args.command === "thread-turns") {
+      printBridgeThreadTurns(output, { invocationCommand: options.invocationCommand });
+      return {};
+    }
+    if (args.command === "goal") {
+      printBridgeGoal(output);
       return {};
     }
     if (args.command === "loaded") {

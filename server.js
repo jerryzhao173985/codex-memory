@@ -360,6 +360,73 @@ function createCodexServer(options = {}) {
           return;
         }
 
+        if (req.method === "GET" && pathname === "/bridge/thread-search" && catalogStore && typeof catalogStore.searchBridgeThreads === "function") {
+          const sortKey = url.searchParams.has("sort_key") || url.searchParams.has("sortKey") || url.searchParams.has("sort")
+            ? (url.searchParams.get("sort_key") || url.searchParams.get("sortKey") || url.searchParams.get("sort") || "")
+            : undefined;
+          sendCatalogAsync(res, () => catalogStore.searchBridgeThreads({
+            q: url.searchParams.get("q") || url.searchParams.get("search_term") || "",
+            limit: readOptionalQueryInteger(url.searchParams, ["limit"], { label: "limit", positive: true }),
+            cursor: url.searchParams.get("cursor") || "",
+            sortKey,
+            sortDirection: url.searchParams.get("sort_direction") || url.searchParams.get("sortDirection") || "",
+            sourceKinds: getRepeatedQueryValues(url.searchParams, ["source_kind", "sourceKind"]),
+            archived: url.searchParams.get("archived") || "",
+          }), "thread search unavailable");
+          return;
+        }
+
+        if (req.method === "GET" && pathname === "/bridge/thread-turns" && catalogStore && typeof catalogStore.listBridgeThreadTurns === "function") {
+          const sessionId = url.searchParams.get("session_id") || url.searchParams.get("sessionId") || "";
+          if (!sessionId) {
+            sendJson(res, 400, { ok: false, error: "session_id is required" });
+            return;
+          }
+          sendCatalogAsync(res, () => catalogStore.listBridgeThreadTurns(sessionId, {
+            cursor: url.searchParams.get("cursor") || "",
+            limit: readOptionalQueryInteger(url.searchParams, ["limit"], { label: "limit", positive: true }),
+            sortDirection: url.searchParams.get("sort_direction") || url.searchParams.get("sortDirection") || "",
+            itemsView: url.searchParams.get("items_view") || url.searchParams.get("itemsView") || "",
+          }), "thread turns unavailable");
+          return;
+        }
+
+        if (req.method === "GET" && pathname === "/bridge/thread/goal" && catalogStore && typeof catalogStore.getBridgeThreadGoal === "function") {
+          const sessionId = url.searchParams.get("session_id") || url.searchParams.get("sessionId") || "";
+          if (!sessionId) {
+            sendJson(res, 400, { ok: false, error: "session_id is required" });
+            return;
+          }
+          sendCatalogAsync(res, () => catalogStore.getBridgeThreadGoal(sessionId), "goal unavailable");
+          return;
+        }
+
+        if (req.method === "POST" && pathname === "/bridge/thread/goal" && catalogStore && typeof catalogStore.setBridgeThreadGoal === "function") {
+          readJsonBody(req).then((data) => {
+            const sessionId = typeof data.session_id === "string" ? data.session_id : data.sessionId;
+            if (!sessionId) {
+              sendJson(res, 400, { ok: false, error: "session_id is required" });
+              return;
+            }
+            if (data.clear === true) {
+              sendCatalogAsync(res, () => catalogStore.clearBridgeThreadGoal(sessionId), "goal unavailable");
+              return;
+            }
+            sendCatalogAsync(res, () => catalogStore.setBridgeThreadGoal(sessionId, {
+              objective: data.objective,
+              status: data.status ?? data.goal_status,
+              tokenBudget: data.token_budget ?? data.tokenBudget,
+              clearTokenBudget: data.clear_token_budget === true || data.clearTokenBudget === true,
+            }), "goal unavailable");
+          }, (err) => {
+            sendJson(res, err && err.statusCode ? err.statusCode : 400, {
+              ok: false,
+              error: err && err.message ? err.message : "bad request",
+            });
+          });
+          return;
+        }
+
         if (req.method === "GET" && pathname === "/bridge/loaded" && catalogStore && typeof catalogStore.listLoadedThreads === "function") {
           sendCatalogAsync(res, () => catalogStore.listLoadedThreads({
             limit: readOptionalQueryInteger(url.searchParams, ["limit"], { label: "limit", positive: true }),

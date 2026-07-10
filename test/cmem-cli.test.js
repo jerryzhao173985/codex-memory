@@ -52,6 +52,7 @@ const readline = require("node:readline");
 const threadPages = ${JSON.stringify(threadPages)};
 const archiveResult = ${JSON.stringify(options.archiveResult || null)};
 const unarchiveResult = ${JSON.stringify(options.unarchiveResult || null)};
+const searchResult = ${JSON.stringify(options.searchResult || null)};
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 function send(message) {
@@ -95,6 +96,18 @@ rl.on("line", (line) => {
         data: [],
         nextCursor: null,
       },
+    });
+    return;
+  }
+
+  if (message.method === "thread/search") {
+    if (!searchResult) {
+      send({ id: message.id, error: { code: -32601, message: "thread/search requires experimentalApi" } });
+      return;
+    }
+    send({
+      id: message.id,
+      result: searchResult,
     });
     return;
   }
@@ -2679,6 +2692,75 @@ describe("cmem CLI", () => {
       (err) => err.status === 7 && /codex exited with 7/.test(String(err.stdout || "")) &&
         /If codex reported an archived thread: cmem unarchive codex:honesty-session/.test(String(err.stdout || ""))
     );
+  });
+
+  it("falls through to exact bridge full-text search when the local index has nothing", () => {
+    const { tmpDir, dateADir } = makeTempSessionDir();
+    const indexDir = path.join(tmpDir, "index");
+    cleanup.push(tmpDir);
+
+    writeRollout(dateADir, "rollout-local.jsonl", [
+      {
+        timestamp: "2026-04-09T15:10:51.000Z",
+        type: "session_meta",
+        payload: { id: "local-session", cwd: "/repo/local" },
+      },
+      {
+        timestamp: "2026-04-09T15:10:52.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-l", last_agent_message: "unrelated content" },
+      },
+    ]);
+
+    const fakeCodexDir = makeFakeCodexDir({}, {
+      searchResult: {
+        data: [
+          {
+            thread: {
+              id: "019d-bridge-hit",
+              preview: "deep rollout content",
+              modelProvider: "openai",
+              createdAt: 1776358310,
+              updatedAt: 1776376184,
+              status: { type: "notLoaded", activeFlags: [] },
+              cwd: "/repo/bridge",
+              cliVersion: "0.144.0",
+              source: "cli",
+            },
+            snippet: "…the qzx_marker appeared in this turn…",
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      },
+    });
+
+    const shared = ["--no-config", "--session-dir", tmpDir, "--index-dir", indexDir];
+    const env = { ...process.env, PATH: `${fakeCodexDir}:${process.env.PATH}` };
+
+    const output = runCmem(["find", "qzx_marker", ...shared], { env });
+    assert.match(output, /Nothing in the local index, but exact full-text search over raw rollouts found 1:/);
+    assert.match(output, /1\. .*codex:019d-bridge-hit/);
+    assert.match(output, /snippet: …the qzx_marker appeared in this turn…/);
+    assert.match(output, /cmem open 1/);
+
+    // The bridge hits feed the snapshot, so bare-N targets them.
+    const snapshot = JSON.parse(fs.readFileSync(path.join(indexDir, "cmem-last-list.json"), "utf8"));
+    assert.deepStrictEqual(snapshot.sessionIds, ["codex:019d-bridge-hit"]);
+
+    // JSON carries the bridge lane as a structured field on pure stdout.
+    const asJson = JSON.parse(runCmem(["find", "qzx_marker", "--json", ...shared], { env }));
+    assert.strictEqual(asJson.total, 0);
+    assert.strictEqual(asJson.bridgeMatches.length, 1);
+    assert.strictEqual(asJson.bridgeMatches[0].sessionId, "codex:019d-bridge-hit");
+
+    // When the bridge lane is unavailable (no searchResult -> -32601), the
+    // plain empty state stands.
+    const plainDir = makeFakeCodexDir({});
+    const plainOutput = runCmem(["find", "qzx_marker", ...shared], {
+      env: { ...process.env, PATH: `${plainDir}:${process.env.PATH}` },
+    });
+    assert.match(plainOutput, /No matches for "qzx_marker"\./);
   });
 
   it("fails loudly when the config file is corrupt", () => {

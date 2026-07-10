@@ -300,6 +300,155 @@ function normalizeBridgeThreadListParams(params = {}) {
   return normalized;
 }
 
+// thread/search shares the list vocabulary but REQUIRES a search term and has
+// no cwd/provider/state-db filters (upstream ThreadSearchParams, v2/thread.rs).
+function normalizeBridgeThreadSearchParams(params = {}) {
+  const searchTermValue = resolveBridgeListValue(params, "searchTerm", [
+    "q",
+    "search_term",
+    "query",
+  ]);
+  const searchTerm = normalizeBridgeIdentifier(searchTermValue);
+  if (!searchTerm) {
+    throw createBridgeContractError(
+      "search term is required",
+      "APP_SERVER_INVALID_THREAD_SEARCH"
+    );
+  }
+  const sortValue = resolveBridgeListValue(params, "sortKey", ["sort", "sort_key"]);
+  const sortDirectionValue = resolveBridgeListValue(params, "sortDirection", [
+    "sort_direction",
+    "direction",
+  ]);
+  const sourceKindValue = resolveBridgeListValue(params, "sourceKinds", [
+    "sourceKind",
+    "source_kinds",
+    "source_kind",
+  ]);
+  return {
+    searchTerm,
+    cursor: normalizeBridgeIdentifier(params.cursor) || undefined,
+    limit: Number.isInteger(params.limit) && params.limit > 0
+      ? params.limit
+      : (Number.isInteger(Number(params.limit)) && Number(params.limit) > 0 ? Number(params.limit) : undefined),
+    sortKey: normalizeBridgeRequiredScalarValue(sortValue, "sort key", requireBridgeThreadSortKey),
+    sortDirection: normalizeBridgeRequiredScalarValue(sortDirectionValue, "sort direction", requireBridgeThreadSortDirection),
+    sourceKinds: normalizeBridgeThreadListValues(
+      sourceKindValue,
+      "source-kind",
+      requireBridgeThreadSourceKind
+    ),
+    archived: normalizeBridgeOptionalBoolean(resolveBridgeListValue(params, "archived")),
+  };
+}
+
+const BRIDGE_CANONICAL_TURN_ITEMS_VIEWS = Object.freeze([
+  "notLoaded",
+  "summary",
+  "full",
+]);
+
+const BRIDGE_TURN_ITEMS_VIEWS = new Map([
+  ["notloaded", "notLoaded"],
+  ["summary", "summary"],
+  ["full", "full"],
+]);
+
+function normalizeBridgeTurnItemsView(value) {
+  const key = normalizeBridgeIdentifierKey(value);
+  return BRIDGE_TURN_ITEMS_VIEWS.get(key) || null;
+}
+
+function requireBridgeTurnItemsView(value) {
+  const itemsView = normalizeBridgeTurnItemsView(value);
+  if (!itemsView) {
+    throw createBridgeContractError(
+      `items view must be one of ${BRIDGE_CANONICAL_TURN_ITEMS_VIEWS.join(", ")}`,
+      "APP_SERVER_INVALID_TURNS_LIST"
+    );
+  }
+  return itemsView;
+}
+
+function normalizeBridgeTurnsListParams(params = {}) {
+  const sortDirectionValue = resolveBridgeListValue(params, "sortDirection", [
+    "sort_direction",
+    "direction",
+  ]);
+  const itemsViewValue = resolveBridgeListValue(params, "itemsView", [
+    "items_view",
+    "view",
+  ]);
+  return {
+    cursor: normalizeBridgeIdentifier(params.cursor) || undefined,
+    limit: Number.isInteger(params.limit) && params.limit > 0
+      ? params.limit
+      : (Number.isInteger(Number(params.limit)) && Number(params.limit) > 0 ? Number(params.limit) : undefined),
+    sortDirection: normalizeBridgeRequiredScalarValue(sortDirectionValue, "sort direction", requireBridgeThreadSortDirection),
+    itemsView: normalizeBridgeRequiredScalarValue(itemsViewValue, "items view", requireBridgeTurnItemsView),
+  };
+}
+
+const BRIDGE_CANONICAL_THREAD_GOAL_STATUSES = Object.freeze([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete",
+]);
+
+const BRIDGE_THREAD_GOAL_STATUSES = new Map(
+  BRIDGE_CANONICAL_THREAD_GOAL_STATUSES.map((status) => [status.toLowerCase(), status])
+);
+
+function normalizeBridgeThreadGoalStatus(value) {
+  const key = normalizeBridgeIdentifierKey(value);
+  return BRIDGE_THREAD_GOAL_STATUSES.get(key) || null;
+}
+
+function requireBridgeThreadGoalStatus(value) {
+  const status = normalizeBridgeThreadGoalStatus(value);
+  if (!status) {
+    throw createBridgeContractError(
+      `goal status must be one of ${BRIDGE_CANONICAL_THREAD_GOAL_STATUSES.join(", ")}`,
+      "APP_SERVER_INVALID_GOAL"
+    );
+  }
+  return status;
+}
+
+// thread/goal/set semantics: omitted fields keep their value; tokenBudget is a
+// double-option upstream (omit = keep, null = clear).
+function normalizeBridgeGoalSetPatch(patch = {}) {
+  const normalized = {};
+  if (patch.objective !== undefined) {
+    if (typeof patch.objective !== "string" || !patch.objective.trim()) {
+      throw createBridgeContractError("goal objective must be a non-empty string", "APP_SERVER_INVALID_GOAL");
+    }
+    normalized.objective = patch.objective.trim();
+  }
+  if (patch.status !== undefined) {
+    normalized.status = requireBridgeThreadGoalStatus(patch.status);
+  }
+  if (patch.clearTokenBudget === true) {
+    normalized.tokenBudget = null;
+  } else if (patch.tokenBudget !== undefined) {
+    const budget = Number(patch.tokenBudget);
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw createBridgeContractError("token budget must be a positive integer", "APP_SERVER_INVALID_GOAL");
+    }
+    normalized.tokenBudget = budget;
+  }
+  if (!Object.keys(normalized).length) {
+    throw createBridgeContractError(
+      "goal update needs --objective, --goal-status, --token-budget, or --clear-token-budget",
+      "APP_SERVER_INVALID_GOAL"
+    );
+  }
+  return normalized;
+}
+
 function normalizeBridgeLoadedListParams(params = {}) {
   return {
     cursor: normalizeBridgeIdentifier(params.cursor) || undefined,
@@ -341,6 +490,15 @@ module.exports = {
   BRIDGE_CANONICAL_THREAD_SORT_KEYS,
   BRIDGE_CANONICAL_THREAD_SORT_DIRECTIONS,
   BRIDGE_CANONICAL_THREAD_SOURCE_KINDS,
+  BRIDGE_CANONICAL_TURN_ITEMS_VIEWS,
+  BRIDGE_CANONICAL_THREAD_GOAL_STATUSES,
+  normalizeBridgeThreadSearchParams,
+  normalizeBridgeTurnsListParams,
+  normalizeBridgeTurnItemsView,
+  requireBridgeTurnItemsView,
+  normalizeBridgeThreadGoalStatus,
+  requireBridgeThreadGoalStatus,
+  normalizeBridgeGoalSetPatch,
   normalizeBridgeOptionalBoolean,
   normalizeBridgeThreadId,
   requireBridgeThreadId,

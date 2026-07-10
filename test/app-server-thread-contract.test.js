@@ -15,6 +15,9 @@ const {
   normalizeBridgeThreadSortKey,
   normalizeBridgeThreadSourceKind,
   normalizeBridgeThreadListParams,
+  normalizeBridgeThreadSearchParams,
+  normalizeBridgeTurnsListParams,
+  normalizeBridgeGoalSetPatch,
   normalizeBridgeLoadedListParams,
   normalizeBridgeRollbackTurns,
   normalizeBridgeThreadName,
@@ -167,6 +170,58 @@ describe("app-server thread contract", () => {
         cwd: undefined,
         searchTerm: undefined,
       }
+    );
+  });
+
+  it("normalizes thread-search, turns-list, and goal params to upstream wire values", () => {
+    assert.deepStrictEqual(
+      normalizeBridgeThreadSearchParams({
+        q: " sqlite WAL ",
+        limit: "5",
+        sort: "recency_at",
+        sortDirection: "Ascending",
+        sourceKinds: ["cli"],
+        archived: "true",
+      }),
+      {
+        searchTerm: "sqlite WAL",
+        cursor: undefined,
+        limit: 5,
+        sortKey: "recency_at",
+        sortDirection: "asc",
+        sourceKinds: ["cli"],
+        archived: true,
+      }
+    );
+    assert.throws(
+      () => normalizeBridgeThreadSearchParams({}),
+      (err) => err && err.code === "APP_SERVER_INVALID_THREAD_SEARCH"
+    );
+
+    assert.deepStrictEqual(
+      normalizeBridgeTurnsListParams({ limit: "3", itemsView: "FULL", sort_direction: "asc" }),
+      { cursor: undefined, limit: 3, sortDirection: "asc", itemsView: "full" }
+    );
+    assert.throws(
+      () => normalizeBridgeTurnsListParams({ itemsView: "everything" }),
+      (err) => err && err.code === "APP_SERVER_INVALID_TURNS_LIST"
+    );
+
+    assert.deepStrictEqual(
+      normalizeBridgeGoalSetPatch({ objective: " finish WAL refactor ", status: "usagelimited", tokenBudget: "200000" }),
+      { objective: "finish WAL refactor", status: "usageLimited", tokenBudget: 200000 }
+    );
+    assert.deepStrictEqual(
+      normalizeBridgeGoalSetPatch({ clearTokenBudget: true }),
+      { tokenBudget: null }
+    );
+    assert.throws(
+      () => normalizeBridgeGoalSetPatch({}),
+      (err) => err && err.code === "APP_SERVER_INVALID_GOAL"
+    );
+    assert.throws(
+      () => normalizeBridgeGoalSetPatch({ status: "done" }),
+      (err) => err && err.code === "APP_SERVER_INVALID_GOAL"
     );
   });
 

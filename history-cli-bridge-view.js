@@ -74,6 +74,66 @@ function createHistoryCliBridgeView(deps = {}) {
     }
   }
 
+  function printBridgeThreadSearch(result, options = {}) {
+    console.log(`thread-search matches=${result.total}`);
+    printSourceSelectionDetails(result.source);
+    console.log("");
+    for (const thread of result.threads) {
+      console.log([
+        thread.sessionId || thread.threadId,
+        thread.updatedAt || thread.createdAt || "",
+        thread.cwd || "",
+        thread.name ? `name=${thread.name}` : "",
+      ].filter(Boolean).join(" | "));
+      if (thread.snippet) console.log(`snippet: ${thread.snippet}`);
+      console.log("");
+    }
+    if (result.nextCursor) console.log(`next cursor: ${result.nextCursor}`);
+    if (result.backwardsCursor) console.log(`backwards cursor: ${result.backwardsCursor} (use with the opposite --sort-direction for newer results)`);
+    if (result.threads.length && options.invocationCommand) {
+      console.log("");
+      console.log("next:");
+      console.log(`  ${options.invocationCommand} thread ${result.threads[0].sessionId}`);
+      console.log(`  ${options.invocationCommand} transcript ${result.threads[0].sessionId} --source app-server`);
+    }
+  }
+
+  function printBridgeThreadTurns(result, options = {}) {
+    console.log(`thread-turns page=${result.total}`);
+    printSourceSelectionDetails(result.source);
+    console.log("");
+    for (const turn of result.turns) {
+      console.log([
+        turn.id || turn.turnId || "(turn)",
+        turn.status ? `status=${typeof turn.status === "string" ? turn.status : turn.status.type || ""}` : "",
+        Number.isFinite(turn.startedAt) ? `started=${new Date(turn.startedAt * 1000).toISOString()}` : "",
+        Array.isArray(turn.items) ? `items=${turn.items.length}` : `itemsView=${turn.itemsView || "notLoaded"}`,
+      ].filter(Boolean).join("  "));
+    }
+    if (result.nextCursor) console.log(`next cursor: ${result.nextCursor} (older turns)`);
+    if (result.backwardsCursor) console.log(`backwards cursor: ${result.backwardsCursor} (newer turns; flip --sort-direction)`);
+  }
+
+  function printBridgeGoal(result) {
+    printSourceSelectionDetails(result.source);
+    if (result.cleared !== undefined) {
+      console.log(`goal cleared: ${result.cleared === true}`);
+      return;
+    }
+    const goal = result.goal;
+    if (!goal) {
+      console.log("no goal set for this thread");
+      return;
+    }
+    console.log(`${goal.sessionId || goal.threadId} | goal=${goal.status || ""}`);
+    console.log(`objective: ${goal.objective}`);
+    console.log([
+      goal.tokenBudget != null ? `token_budget=${goal.tokenBudget}` : "",
+      `tokens_used=${goal.tokensUsed}`,
+      `time_used_s=${Math.round(goal.timeUsedSeconds)}`,
+    ].filter(Boolean).join("  "));
+  }
+
   function printBridgeLoadedThreads(result) {
     console.log(`loaded=${result.total}`);
     printSourceSelectionDetails(result.source);
@@ -259,6 +319,9 @@ function createHistoryCliBridgeView(deps = {}) {
   return {
     buildBridgeThreadListHints,
     printBridgeThreadList,
+    printBridgeThreadSearch,
+    printBridgeThreadTurns,
+    printBridgeGoal,
     printBridgeLoadedThreads,
     printBridgeThread,
     printPruneCandidates,

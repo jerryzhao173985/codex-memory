@@ -116,7 +116,56 @@ function normalizeBridgeListResponse(response) {
   return {
     total: threads.length,
     nextCursor: response && typeof response.nextCursor === "string" ? response.nextCursor : null,
+    backwardsCursor: response && typeof response.backwardsCursor === "string" ? response.backwardsCursor : null,
     threads,
+  };
+}
+
+function normalizeBridgeSearchResponse(response) {
+  const results = Array.isArray(response && response.data)
+    ? response.data
+      .map((entry) => {
+        const thread = normalizeBridgeThread(entry && entry.thread);
+        if (!thread) return null;
+        return {
+          ...thread,
+          snippet: entry && typeof entry.snippet === "string" ? entry.snippet : "",
+        };
+      })
+      .filter(Boolean)
+    : [];
+  return {
+    total: results.length,
+    nextCursor: response && typeof response.nextCursor === "string" ? response.nextCursor : null,
+    backwardsCursor: response && typeof response.backwardsCursor === "string" ? response.backwardsCursor : null,
+    threads: results,
+  };
+}
+
+function normalizeBridgeTurnsListResponse(response) {
+  const turns = Array.isArray(response && response.data)
+    ? response.data.filter((turn) => turn && typeof turn === "object")
+    : [];
+  return {
+    total: turns.length,
+    nextCursor: response && typeof response.nextCursor === "string" ? response.nextCursor : null,
+    backwardsCursor: response && typeof response.backwardsCursor === "string" ? response.backwardsCursor : null,
+    turns,
+  };
+}
+
+function normalizeBridgeGoal(goal) {
+  if (!goal || typeof goal !== "object") return null;
+  return {
+    threadId: typeof goal.threadId === "string" ? goal.threadId : "",
+    sessionId: prefixedSessionId(goal.threadId) || "",
+    objective: typeof goal.objective === "string" ? goal.objective : "",
+    status: typeof goal.status === "string" ? goal.status : null,
+    tokenBudget: Number.isInteger(goal.tokenBudget) ? goal.tokenBudget : null,
+    tokensUsed: Number.isInteger(goal.tokensUsed) ? goal.tokensUsed : 0,
+    timeUsedSeconds: Number.isFinite(goal.timeUsedSeconds) ? goal.timeUsedSeconds : 0,
+    createdAt: Number.isFinite(goal.createdAt) ? goal.createdAt : null,
+    updatedAt: Number.isFinite(goal.updatedAt) ? goal.updatedAt : null,
   };
 }
 
@@ -165,6 +214,9 @@ function buildBridgeThreadSessionView(thread, fallbackSession = null) {
 module.exports = {
   attachBridgeOperationSource,
   normalizeBridgeListResponse,
+  normalizeBridgeSearchResponse,
+  normalizeBridgeTurnsListResponse,
+  normalizeBridgeGoal,
   normalizeBridgeLoadedResponse,
   normalizeBridgeThreadLifecycleResult,
   normalizeBridgeThreadMemoryModeResult,
